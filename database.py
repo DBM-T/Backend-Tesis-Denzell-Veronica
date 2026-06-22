@@ -24,7 +24,8 @@ def supabase_admin() -> Client:
 
 
 # ── 2. asyncpg pool (inicializado en startup) ──────────────────
-_pool: asyncpg.Pool | None = None
+_pool: asyncpg.Pool | None = None 
+ssl='require'
 
 
 async def init_db_pool():
