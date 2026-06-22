@@ -13,3 +13,22 @@ node_modules/
 **/__pycache__/
 __pycache__/
 *.pyc
+
+# IDEs y editores
+.vscode/
+.idea/
+.kiro/
+*.swp
+*.swo
+*~
+
+# Archivos temporales
+test_db.py
+*.temp
+*.tmp
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+

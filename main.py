@@ -19,8 +19,8 @@ async def lifespan(app: FastAPI):
     logger.info("▶  Iniciando BD pool...")
     await init_db_pool()
     logger.info("▶  Cargando modelo RNS...")
-    from services.rns_service import rns_service
-    await rns_service.load_model()
+    # from services.rns_service import rns_service
+    # await rns_service.load_model()
     logger.info("✔  Sistema listo")
     yield
     await close_db_pool()

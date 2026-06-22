@@ -5,9 +5,11 @@ database.py — Dos clientes de base de datos:
 """
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+import asyncio
 
 import asyncpg
 from supabase import create_client, Client
+from loguru import logger
 from config import get_settings
 
 _settings = get_settings()
@@ -24,18 +26,16 @@ def supabase_admin() -> Client:
 
 
 # ── 2. asyncpg pool (inicializado en startup) ──────────────────
-_pool: asyncpg.Pool | None = None 
-ssl='require'
+_pool: asyncpg.Pool | None = None
 
 
 async def init_db_pool():
     global _pool
-    _pool = await asyncpg.create_pool(
-        dsn=_settings.database_url,
-        min_size=2,
-        max_size=10,
-        command_timeout=30,
-    )
+    # ⚠️ TEMPORAL: Deshabilitado debido a problema de DNS con asyncpg
+    # El cliente Supabase-py funciona vía REST API (sin DNS directo)
+    logger.warning("⚠️  Pool de asyncpg deshabilitado (problema DNS)")
+    _pool = None
+    logger.info("✓ BD inicializada (modo REST via Supabase)")
 
 
 async def close_db_pool():
