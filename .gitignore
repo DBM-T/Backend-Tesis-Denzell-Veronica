@@ -3,3 +3,5 @@
 .venv/
 venv/
 GUIA_BACKEND.md
+**/venv/
+**/.venv/
