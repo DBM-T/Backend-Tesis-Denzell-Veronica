@@ -1,0 +1,30 @@
+# ── Web framework ──────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+
+# ── Supabase / PostgreSQL ──────────────────────────────────────
+supabase==2.5.0          # cliente Supabase (PostgREST + Auth + Storage)
+asyncpg==0.29.0          # conexión directa PostgreSQL (consultas RNS complejas)
+sqlalchemy[asyncio]==2.0.30
+
+# ── Auth / JWT ─────────────────────────────────────────────────
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# ── Schemas / Validación ───────────────────────────────────────
+pydantic==2.7.1
+pydantic-settings==2.2.1
+
+# ── RNS — PyTorch + Sentence Transformers ─────────────────────
+torch==2.3.0
+sentence-transformers==2.7.0
+numpy==1.26.4
+scikit-learn==1.4.2       # métricas: accuracy, F1, precisión
+
+# ── HTTP async ────────────────────────────────────────────────
+httpx==0.27.0
+
+# ── Utilidades ────────────────────────────────────────────────
+python-dotenv==1.0.1
+loguru==0.7.2
