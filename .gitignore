@@ -1,2 +1,5 @@
 .venv/
+# Ignorar el entorno virtual de Python
+.venv/
+venv/
 GUIA_BACKEND.md
