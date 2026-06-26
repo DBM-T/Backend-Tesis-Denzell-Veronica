@@ -22,6 +22,7 @@ from schemas.ml import (
 )
 from services.lead_time_model_service import find_lead_time_matches, predict_lead_time_days
 from services.access_control import ensure_action
+from services.postgrest_utils import encode_postgrest_payload
 
 router = APIRouter()
 
@@ -67,15 +68,17 @@ async def create_model(
     result = (
         admin.table("ml_modelos")
         .insert(
-            {
-                "nombre": body.nombre,
-                "tipo": body.tipo,
-                "proposito": body.proposito,
-                "version": body.version,
-                "metricas": body.metricas,
-                "hiperparametros": body.hiperparametros,
-                "activo": body.activo,
-            }
+            encode_postgrest_payload(
+                {
+                    "nombre": body.nombre,
+                    "tipo": body.tipo,
+                    "proposito": body.proposito,
+                    "version": body.version,
+                    "metricas": body.metricas,
+                    "hiperparametros": body.hiperparametros,
+                    "activo": body.activo,
+                }
+            )
         )
         .execute()
     )
@@ -90,7 +93,7 @@ async def update_model(
     payload: dict,
     _user: CurrentUser = Depends(require_roles("superadmin", "admin")),
 ):
-    result = supabase_admin().table("ml_modelos").update(payload).eq("id", str(model_id)).execute()
+    result = supabase_admin().table("ml_modelos").update(encode_postgrest_payload(payload)).eq("id", str(model_id)).execute()
     if not result.data:
         raise HTTPException(404, "Modelo no encontrado")
     return result.data[0]
@@ -159,11 +162,13 @@ async def predict_priority(
     result = (
         admin.table("ordenes_trabajo")
         .update(
-            {
-                "prioridad_ml": prioridad,
-                "prioridad_confianza": confianza,
-                "prioridad_ml_version": version,
-            }
+            encode_postgrest_payload(
+                {
+                    "prioridad_ml": prioridad,
+                    "prioridad_confianza": confianza,
+                    "prioridad_ml_version": version,
+                }
+            )
         )
         .eq("id", str(body.ot_id))
         .execute()
@@ -265,19 +270,21 @@ async def create_demand_forecast(
         supabase_admin()
         .table("ml_predicciones_demanda")
         .insert(
-            {
-                "producto_id": str(body.producto_id),
-                "sede_id": str(body.sede_id),
-                "modelo_id": str(body.modelo_id) if body.modelo_id else None,
-                "periodo_inicio": body.periodo_inicio.isoformat(),
-                "periodo_fin": body.periodo_fin.isoformat(),
-                "horizonte_dias": body.horizonte_dias,
-                "qty_predicha": body.qty_predicha,
-                "intervalo_inf": body.intervalo_inf,
-                "intervalo_sup": body.intervalo_sup,
-                "rop_calculado": body.rop_calculado,
-                "stock_seguridad_sugerido": body.stock_seguridad_sugerido,
-            }
+            encode_postgrest_payload(
+                {
+                    "producto_id": str(body.producto_id),
+                    "sede_id": str(body.sede_id),
+                    "modelo_id": str(body.modelo_id) if body.modelo_id else None,
+                    "periodo_inicio": body.periodo_inicio.isoformat(),
+                    "periodo_fin": body.periodo_fin.isoformat(),
+                    "horizonte_dias": body.horizonte_dias,
+                    "qty_predicha": body.qty_predicha,
+                    "intervalo_inf": body.intervalo_inf,
+                    "intervalo_sup": body.intervalo_sup,
+                    "rop_calculado": body.rop_calculado,
+                    "stock_seguridad_sugerido": body.stock_seguridad_sugerido,
+                }
+            )
         )
         .execute()
     )
@@ -295,7 +302,7 @@ async def update_demand_forecast(
     result = (
         supabase_admin()
         .table("ml_predicciones_demanda")
-        .update(payload)
+        .update(encode_postgrest_payload(payload))
         .eq("id", str(forecast_id))
         .execute()
     )
@@ -313,10 +320,12 @@ async def approve_demand_forecast(
     result = (
         admin.table("ml_predicciones_demanda")
         .update(
-            {
-                "aprobado_por_gerencia": True,
-                "aprobado_at": datetime.utcnow().isoformat(),
-            }
+            encode_postgrest_payload(
+                {
+                    "aprobado_por_gerencia": True,
+                    "aprobado_at": datetime.utcnow().isoformat(),
+                }
+            )
         )
         .eq("id", str(forecast_id))
         .execute()
@@ -342,9 +351,9 @@ async def approve_demand_forecast(
         .execute()
     )
     if existing.data:
-        admin.table("stock").update(stock_payload).eq("id", existing.data[0]["id"]).execute()
+        admin.table("stock").update(encode_postgrest_payload(stock_payload)).eq("id", existing.data[0]["id"]).execute()
     else:
-        admin.table("stock").insert(stock_payload).execute()
+        admin.table("stock").insert(encode_postgrest_payload(stock_payload)).execute()
     return forecast
 
 
@@ -400,13 +409,13 @@ async def score_provider(
     if existing.data:
         row = (
             admin.table("proveedor_metricas")
-            .update({**payload, "calculado_at": datetime.utcnow().isoformat()})
+            .update(encode_postgrest_payload({**payload, "calculado_at": datetime.utcnow().isoformat()}))
             .eq("id", existing.data[0]["id"])
             .execute()
             .data[0]
         )
     else:
-        row = admin.table("proveedor_metricas").insert(payload).execute().data[0]
+        row = admin.table("proveedor_metricas").insert(encode_postgrest_payload(payload)).execute().data[0]
 
     ranking_rows = (
         admin.table("proveedor_metricas")
@@ -418,7 +427,7 @@ async def score_provider(
         or []
     )
     for index, metric in enumerate(ranking_rows, start=1):
-        admin.table("proveedor_metricas").update({"ranking": index}).eq(
+        admin.table("proveedor_metricas").update(encode_postgrest_payload({"ranking": index})).eq(
             "id", metric["id"]
         ).execute()
 

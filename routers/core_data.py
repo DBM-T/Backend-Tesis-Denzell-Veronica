@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from auth import CurrentUser, get_current_user
 from database import supabase_admin
 from services.access_control import ensure_action, ensure_payload_scope, ensure_row_access, fetch_row, filter_rows
+from services.postgrest_utils import encode_postgrest_payload
 
 router = APIRouter()
 
@@ -35,7 +36,7 @@ def _get(resource: str, row_id: str, user: CurrentUser):
 def _create(resource: str, payload: dict[str, Any], user: CurrentUser):
     ensure_action(user, resource, "create")
     ensure_payload_scope(user, resource, payload)
-    result = supabase_admin().table(resource).insert(payload).execute()
+    result = supabase_admin().table(resource).insert(encode_postgrest_payload(payload)).execute()
     if not result.data:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"No se pudo crear '{resource}'")
     return ensure_row_access(user, resource, result.data[0])
@@ -46,7 +47,7 @@ def _update(resource: str, row_id: str, payload: dict[str, Any], user: CurrentUs
     current = ensure_row_access(user, resource, fetch_row(resource, row_id))
     merged = {**current, **payload}
     ensure_payload_scope(user, resource, merged)
-    result = supabase_admin().table(resource).update(payload).eq("id", row_id).execute()
+    result = supabase_admin().table(resource).update(encode_postgrest_payload(payload)).eq("id", row_id).execute()
     if not result.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registro no encontrado")
     return ensure_row_access(user, resource, result.data[0])

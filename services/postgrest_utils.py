@@ -2,6 +2,7 @@
 from decimal import Decimal
 from typing import Any
 
+from fastapi.encoders import jsonable_encoder
 
 def relation_one(value: Any) -> dict[str, Any]:
     if isinstance(value, list):
@@ -19,3 +20,7 @@ def sum_decimal(items: list[dict[str, Any]] | None, key: str) -> Decimal:
             total += Decimal(str(value))
     return total
 
+
+def encode_postgrest_payload(payload: Any) -> Any:
+    """Convert payloads to JSON-safe primitives before sending them to Supabase."""
+    return jsonable_encoder(payload)

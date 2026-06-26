@@ -8,7 +8,7 @@ from auth import CurrentUser, get_current_user, require_roles
 from database import supabase_admin
 from schemas.part import PartCreate, PartOut, PartUpdate
 from services.access_control import ensure_action
-from services.postgrest_utils import relation_one, sum_decimal
+from services.postgrest_utils import encode_postgrest_payload, relation_one, sum_decimal
 
 router = APIRouter()
 
@@ -75,17 +75,19 @@ async def create_part(
         supabase_admin()
         .table("productos")
         .insert(
-            {
-                "sku_padre": body.sku_padre,
-                "nombre": body.nombre,
-                "descripcion": body.descripcion,
-                "categoria_id": str(body.categoria_id) if body.categoria_id else None,
-                "marca": body.marca,
-                "codigo_fabricante": body.codigo_fabricante,
-                "unidad_medida": body.unidad_medida,
-                "vehiculos_compatibles": body.vehiculos_compatibles,
-                "precio_referencia": body.precio_referencia,
-            }
+            encode_postgrest_payload(
+                {
+                    "sku_padre": body.sku_padre,
+                    "nombre": body.nombre,
+                    "descripcion": body.descripcion,
+                    "categoria_id": str(body.categoria_id) if body.categoria_id else None,
+                    "marca": body.marca,
+                    "codigo_fabricante": body.codigo_fabricante,
+                    "unidad_medida": body.unidad_medida,
+                    "vehiculos_compatibles": body.vehiculos_compatibles,
+                    "precio_referencia": body.precio_referencia,
+                }
+            )
         )
         .execute()
     )
@@ -112,7 +114,7 @@ async def update_part(
     result = (
         supabase_admin()
         .table("productos")
-        .update(updates)
+        .update(encode_postgrest_payload(updates))
         .eq("id", str(part_id))
         .execute()
     )

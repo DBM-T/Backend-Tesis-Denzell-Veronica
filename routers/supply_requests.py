@@ -8,7 +8,7 @@ from auth import CurrentUser, get_current_user, require_roles
 from database import supabase_admin
 from schemas.supply_request import SupplyRequestCreate, SupplyRequestOut, SupplyRequestStatusUpdate
 from services.access_control import ensure_action, ensure_payload_scope, ensure_row_access, fetch_row, filter_rows
-from services.postgrest_utils import relation_one
+from services.postgrest_utils import encode_postgrest_payload, relation_one
 
 router = APIRouter()
 
@@ -66,14 +66,16 @@ async def create_request(
     header = (
         admin.table("requisiciones_compra")
         .insert(
-            {
-                "sede_id": str(body.sede_id),
-                "ot_id": str(body.ot_id) if body.ot_id else None,
-                "origen": body.origen,
-                "prioridad": body.prioridad,
-                "observaciones": body.observaciones,
-                "solicitado_por": user.id,
-            }
+            encode_postgrest_payload(
+                {
+                    "sede_id": str(body.sede_id),
+                    "ot_id": str(body.ot_id) if body.ot_id else None,
+                    "origen": body.origen,
+                    "prioridad": body.prioridad,
+                    "observaciones": body.observaciones,
+                    "solicitado_por": user.id,
+                }
+            )
         )
         .execute()
     )
@@ -83,19 +85,21 @@ async def create_request(
     request_row = header.data[0]
     if body.lineas:
         admin.table("requisicion_lineas").insert(
-            [
-                {
-                    "requisicion_id": request_row["id"],
-                    "producto_id": str(line.producto_id),
-                    "qty_solicitada": line.qty_solicitada,
-                    "precio_estimado": line.precio_estimado,
-                    "proveedor_sugerido_id": (
-                        str(line.proveedor_sugerido_id) if line.proveedor_sugerido_id else None
-                    ),
-                    "observaciones": line.observaciones,
-                }
-                for line in body.lineas
-            ]
+            encode_postgrest_payload(
+                [
+                    {
+                        "requisicion_id": request_row["id"],
+                        "producto_id": str(line.producto_id),
+                        "qty_solicitada": line.qty_solicitada,
+                        "precio_estimado": line.precio_estimado,
+                        "proveedor_sugerido_id": (
+                            str(line.proveedor_sugerido_id) if line.proveedor_sugerido_id else None
+                        ),
+                        "observaciones": line.observaciones,
+                    }
+                    for line in body.lineas
+                ]
+            )
         ).execute()
     return request_row
 
@@ -112,7 +116,7 @@ async def update_request(
     result = (
         supabase_admin()
         .table("requisiciones_compra")
-        .update(payload)
+        .update(encode_postgrest_payload(payload))
         .eq("id", str(request_id))
         .execute()
     )
@@ -138,7 +142,7 @@ async def update_status(
     result = (
         supabase_admin()
         .table("requisiciones_compra")
-        .update(payload)
+        .update(encode_postgrest_payload(payload))
         .eq("id", str(request_id))
         .execute()
     )
@@ -198,7 +202,7 @@ async def create_request_line(
     ensure_action(user, "requisicion_lineas", "create")
     ensure_row_access(user, "requisiciones_compra", fetch_row("requisiciones_compra", str(request_id)))
     payload["requisicion_id"] = str(request_id)
-    result = supabase_admin().table("requisicion_lineas").insert(payload).execute()
+    result = supabase_admin().table("requisicion_lineas").insert(encode_postgrest_payload(payload)).execute()
     if not result.data:
         raise HTTPException(500, "No se pudo crear la linea de requisicion")
     return result.data[0]
@@ -212,7 +216,7 @@ async def update_request_line(
 ):
     ensure_action(user, "requisicion_lineas", "update")
     ensure_row_access(user, "requisicion_lineas", fetch_row("requisicion_lineas", str(line_id)))
-    result = supabase_admin().table("requisicion_lineas").update(payload).eq("id", str(line_id)).execute()
+    result = supabase_admin().table("requisicion_lineas").update(encode_postgrest_payload(payload)).eq("id", str(line_id)).execute()
     if not result.data:
         raise HTTPException(404, "Linea no encontrada")
     return result.data[0]

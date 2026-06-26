@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from auth import CurrentUser, get_current_user, require_roles
 from database import supabase_admin
 from services.access_control import ensure_action, ensure_payload_scope, ensure_row_access, fetch_row, filter_rows
+from services.postgrest_utils import encode_postgrest_payload
 
 router = APIRouter()
 
@@ -65,17 +66,19 @@ async def create_work_order(
         supabase_admin()
         .table("ordenes_trabajo")
         .insert(
-            {
-                "cita_id": str(body.cita_id) if body.cita_id else None,
-                "sede_id": str(body.sede_id),
-                "vehiculo_id": str(body.vehiculo_id),
-                "tecnico_id": str(body.tecnico_id) if body.tecnico_id else None,
-                "prioridad": body.prioridad,
-                "diagnostico_inicial": body.diagnostico_inicial,
-                "km_ingreso": body.km_ingreso,
-                "tiempo_estimado_horas": body.tiempo_estimado_horas,
-                "created_by": user.id,
-            }
+            encode_postgrest_payload(
+                {
+                    "cita_id": str(body.cita_id) if body.cita_id else None,
+                    "sede_id": str(body.sede_id),
+                    "vehiculo_id": str(body.vehiculo_id),
+                    "tecnico_id": str(body.tecnico_id) if body.tecnico_id else None,
+                    "prioridad": body.prioridad,
+                    "diagnostico_inicial": body.diagnostico_inicial,
+                    "km_ingreso": body.km_ingreso,
+                    "tiempo_estimado_horas": body.tiempo_estimado_horas,
+                    "created_by": user.id,
+                }
+            )
         )
         .execute()
     )
@@ -94,7 +97,11 @@ async def update_work_order(
     current = ensure_row_access(user, "ordenes_trabajo", fetch_row("ordenes_trabajo", str(ot_id)))
     ensure_payload_scope(user, "ordenes_trabajo", {**current, **payload})
     result = (
-        supabase_admin().table("ordenes_trabajo").update(payload).eq("id", str(ot_id)).execute()
+        supabase_admin()
+        .table("ordenes_trabajo")
+        .update(encode_postgrest_payload(payload))
+        .eq("id", str(ot_id))
+        .execute()
     )
     if not result.data:
         raise HTTPException(404, "Orden de trabajo no encontrada")
@@ -125,7 +132,7 @@ async def update_ot_status(
     result = (
         supabase_admin()
         .table("ordenes_trabajo")
-        .update({"estado": estado})
+        .update(encode_postgrest_payload({"estado": estado}))
         .eq("id", str(ot_id))
         .execute()
     )
@@ -159,7 +166,7 @@ async def create_ot_line(
     ensure_action(user, "ot_lineas", "create")
     ensure_row_access(user, "ordenes_trabajo", fetch_row("ordenes_trabajo", str(ot_id)))
     payload["ot_id"] = str(ot_id)
-    result = supabase_admin().table("ot_lineas").insert(payload).execute()
+    result = supabase_admin().table("ot_lineas").insert(encode_postgrest_payload(payload)).execute()
     if not result.data:
         raise HTTPException(500, "No se pudo crear la linea de OT")
     return ensure_row_access(user, "ot_lineas", result.data[0])
@@ -173,7 +180,7 @@ async def update_ot_line(
 ):
     ensure_action(user, "ot_lineas", "update")
     current = ensure_row_access(user, "ot_lineas", fetch_row("ot_lineas", str(line_id)))
-    result = supabase_admin().table("ot_lineas").update(payload).eq("id", str(line_id)).execute()
+    result = supabase_admin().table("ot_lineas").update(encode_postgrest_payload(payload)).eq("id", str(line_id)).execute()
     if not result.data:
         raise HTTPException(404, "Linea de OT no encontrada")
     return ensure_row_access(user, "ot_lineas", result.data[0])

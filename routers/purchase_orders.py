@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from auth import CurrentUser, get_current_user, require_roles
 from database import supabase_admin
 from services.access_control import ensure_action, ensure_payload_scope, ensure_row_access, fetch_row, filter_rows
-from services.postgrest_utils import relation_one
+from services.postgrest_utils import encode_postgrest_payload, relation_one
 
 router = APIRouter()
 
@@ -75,17 +75,19 @@ async def create_purchase_order(
     header = (
         admin.table("ordenes_compra")
         .insert(
-            {
-                "requisicion_id": str(body.requisicion_id) if body.requisicion_id else None,
-                "proveedor_id": str(body.proveedor_id),
-                "sede_id": str(body.sede_id),
-                "canal": body.canal,
-                "canal_sugerido_ml": body.canal_sugerido_ml,
-                "prioridad": body.prioridad,
-                "fecha_entrega_estimada": delivery_date.isoformat() if delivery_date else None,
-                "observaciones": body.observaciones,
-                "creado_por": user.id,
-            }
+            encode_postgrest_payload(
+                {
+                    "requisicion_id": str(body.requisicion_id) if body.requisicion_id else None,
+                    "proveedor_id": str(body.proveedor_id),
+                    "sede_id": str(body.sede_id),
+                    "canal": body.canal,
+                    "canal_sugerido_ml": body.canal_sugerido_ml,
+                    "prioridad": body.prioridad,
+                    "fecha_entrega_estimada": delivery_date.isoformat() if delivery_date else None,
+                    "observaciones": body.observaciones,
+                    "creado_por": user.id,
+                }
+            )
         )
         .execute()
     )
@@ -95,15 +97,17 @@ async def create_purchase_order(
     po = header.data[0]
     if body.lineas:
         admin.table("oc_lineas").insert(
-            [
-                {
-                    "oc_id": po["id"],
-                    "producto_id": str(line.producto_id),
-                    "qty_pedida": line.qty_pedida,
-                    "precio_unitario": line.precio_unitario,
-                }
-                for line in body.lineas
-            ]
+            encode_postgrest_payload(
+                [
+                    {
+                        "oc_id": po["id"],
+                        "producto_id": str(line.producto_id),
+                        "qty_pedida": line.qty_pedida,
+                        "precio_unitario": line.precio_unitario,
+                    }
+                    for line in body.lineas
+                ]
+            )
         ).execute()
     return po
 
@@ -117,7 +121,13 @@ async def update_purchase_order(
     ensure_action(user, "ordenes_compra", "update")
     current = ensure_row_access(user, "ordenes_compra", fetch_row("ordenes_compra", str(po_id)))
     ensure_payload_scope(user, "ordenes_compra", {**current, **payload})
-    result = supabase_admin().table("ordenes_compra").update(payload).eq("id", str(po_id)).execute()
+    result = (
+        supabase_admin()
+        .table("ordenes_compra")
+        .update(encode_postgrest_payload(payload))
+        .eq("id", str(po_id))
+        .execute()
+    )
     if not result.data:
         raise HTTPException(404, "Orden de compra no encontrada")
     return result.data[0]
@@ -133,11 +143,13 @@ async def approve_order(
         supabase_admin()
         .table("ordenes_compra")
         .update(
-            {
-                "estado": "enviada",
-                "aprobado_por": user.id,
-                "aprobado_at": datetime.utcnow().isoformat(),
-            }
+            encode_postgrest_payload(
+                {
+                    "estado": "enviada",
+                    "aprobado_por": user.id,
+                    "aprobado_at": datetime.utcnow().isoformat(),
+                }
+            )
         )
         .eq("id", str(po_id))
         .execute()
@@ -159,7 +171,7 @@ async def update_order_status(
     result = (
         supabase_admin()
         .table("ordenes_compra")
-        .update({"estado": estado})
+        .update(encode_postgrest_payload({"estado": estado}))
         .eq("id", str(po_id))
         .execute()
     )
@@ -209,7 +221,7 @@ async def create_order_line(
     ensure_action(user, "oc_lineas", "create")
     ensure_row_access(user, "ordenes_compra", fetch_row("ordenes_compra", str(po_id)))
     payload["oc_id"] = str(po_id)
-    result = supabase_admin().table("oc_lineas").insert(payload).execute()
+    result = supabase_admin().table("oc_lineas").insert(encode_postgrest_payload(payload)).execute()
     if not result.data:
         raise HTTPException(500, "No se pudo crear la linea de OC")
     return result.data[0]
@@ -223,7 +235,7 @@ async def update_order_line(
 ):
     ensure_action(user, "oc_lineas", "update")
     ensure_row_access(user, "oc_lineas", fetch_row("oc_lineas", str(line_id)))
-    result = supabase_admin().table("oc_lineas").update(payload).eq("id", str(line_id)).execute()
+    result = supabase_admin().table("oc_lineas").update(encode_postgrest_payload(payload)).eq("id", str(line_id)).execute()
     if not result.data:
         raise HTTPException(404, "Linea de OC no encontrada")
     return result.data[0]
