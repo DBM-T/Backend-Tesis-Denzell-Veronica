@@ -10,6 +10,9 @@ from database import supabase_admin
 from schemas.ml import (
     DemandForecastCreate,
     DemandForecastOut,
+    LeadTimeMatchesResponse,
+    LeadTimePredictionRequest,
+    LeadTimePredictionResponse,
     MLModelCreate,
     MLModelOut,
     PriorityPredictionRequest,
@@ -17,6 +20,8 @@ from schemas.ml import (
     ProviderScoreOut,
     ProviderScoreRequest,
 )
+from services.lead_time_model_service import find_lead_time_matches, predict_lead_time_days
+from services.access_control import ensure_action
 
 router = APIRouter()
 
@@ -28,6 +33,7 @@ async def list_models(
     activo: bool | None = None,
     _user: CurrentUser = Depends(get_current_user),
 ):
+    ensure_action(_user, "ml_modelos", "read")
     query = supabase_admin().table("ml_modelos").select("*")
     if tipo:
         query = query.eq("tipo", tipo)
@@ -37,6 +43,15 @@ async def list_models(
         query = query.eq("activo", activo)
     result = query.order("fecha_entrenamiento", desc=True).execute()
     return result.data or []
+
+
+@router.get("/models/{model_id}", response_model=MLModelOut)
+async def get_model(model_id: UUID, _user: CurrentUser = Depends(get_current_user)):
+    ensure_action(_user, "ml_modelos", "read")
+    result = supabase_admin().table("ml_modelos").select("*").eq("id", str(model_id)).limit(1).execute()
+    if not result.data:
+        raise HTTPException(404, "Modelo no encontrado")
+    return result.data[0]
 
 
 @router.post("/models", response_model=MLModelOut, status_code=201)
@@ -69,6 +84,18 @@ async def create_model(
     return result.data[0]
 
 
+@router.patch("/models/{model_id}", response_model=MLModelOut)
+async def update_model(
+    model_id: UUID,
+    payload: dict,
+    _user: CurrentUser = Depends(require_roles("superadmin", "admin")),
+):
+    result = supabase_admin().table("ml_modelos").update(payload).eq("id", str(model_id)).execute()
+    if not result.data:
+        raise HTTPException(404, "Modelo no encontrado")
+    return result.data[0]
+
+
 @router.patch("/models/{model_id}/activate", response_model=MLModelOut)
 async def activate_model(
     model_id: UUID,
@@ -84,6 +111,17 @@ async def activate_model(
     ).execute()
     result = admin.table("ml_modelos").update({"activo": True}).eq("id", str(model_id)).execute()
     return result.data[0]
+
+
+@router.delete("/models/{model_id}")
+async def delete_model(
+    model_id: UUID,
+    _user: CurrentUser = Depends(require_roles("superadmin", "admin")),
+):
+    result = supabase_admin().table("ml_modelos").delete().eq("id", str(model_id)).execute()
+    if not result.data:
+        raise HTTPException(404, "Modelo no encontrado")
+    return {"detail": "Modelo eliminado", "id": str(model_id)}
 
 
 @router.post("/priority/predict", response_model=PriorityPredictionResponse)
@@ -139,6 +177,52 @@ async def predict_priority(
     }
 
 
+@router.post("/lead-time/predict", response_model=LeadTimePredictionResponse)
+async def predict_lead_time(
+    body: LeadTimePredictionRequest,
+    _user: CurrentUser = Depends(
+        require_roles(
+            "superadmin",
+            "admin",
+            "gerencia",
+            "logistica",
+            "almacen",
+            "almacen_senior",
+        )
+    ),
+):
+    try:
+        return predict_lead_time_days(body.model_dump())
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error prediciendo lead time: {exc}")
+
+
+@router.post("/lead-time/matches", response_model=LeadTimeMatchesResponse)
+async def lead_time_matches(
+    body: LeadTimePredictionRequest,
+    limit: int = Query(20, ge=1, le=100),
+    _user: CurrentUser = Depends(
+        require_roles(
+            "superadmin",
+            "admin",
+            "gerencia",
+            "logistica",
+            "almacen",
+            "almacen_senior",
+        )
+    ),
+):
+    try:
+        total, items = find_lead_time_matches(body.model_dump(), limit=limit)
+        return {"total": total, "shown": len(items), "items": items}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo matches de lead time: {exc}")
+
+
 @router.get("/demand/forecasts", response_model=list[DemandForecastOut])
 async def list_demand_forecasts(
     producto_id: UUID | None = None,
@@ -146,6 +230,7 @@ async def list_demand_forecasts(
     limit: int = Query(100, le=500),
     _user: CurrentUser = Depends(get_current_user),
 ):
+    ensure_action(_user, "ml_predicciones_demanda", "read")
     query = supabase_admin().table("ml_predicciones_demanda").select("*")
     if producto_id:
         query = query.eq("producto_id", str(producto_id))
@@ -155,10 +240,26 @@ async def list_demand_forecasts(
     return result.data or []
 
 
+@router.get("/demand/forecasts/{forecast_id}", response_model=DemandForecastOut)
+async def get_demand_forecast(forecast_id: UUID, _user: CurrentUser = Depends(get_current_user)):
+    ensure_action(_user, "ml_predicciones_demanda", "read")
+    result = (
+        supabase_admin()
+        .table("ml_predicciones_demanda")
+        .select("*")
+        .eq("id", str(forecast_id))
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(404, "Prediccion no encontrada")
+    return result.data[0]
+
+
 @router.post("/demand/forecasts", response_model=DemandForecastOut, status_code=201)
 async def create_demand_forecast(
     body: DemandForecastCreate,
-    _user: CurrentUser = Depends(require_roles("superadmin", "admin", "logistica")),
+    _user: CurrentUser = Depends(require_roles("superadmin", "admin")),
 ):
     result = (
         supabase_admin()
@@ -185,10 +286,28 @@ async def create_demand_forecast(
     return result.data[0]
 
 
+@router.patch("/demand/forecasts/{forecast_id}", response_model=DemandForecastOut)
+async def update_demand_forecast(
+    forecast_id: UUID,
+    payload: dict,
+    _user: CurrentUser = Depends(require_roles("superadmin", "admin")),
+):
+    result = (
+        supabase_admin()
+        .table("ml_predicciones_demanda")
+        .update(payload)
+        .eq("id", str(forecast_id))
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(404, "Prediccion no encontrada")
+    return result.data[0]
+
+
 @router.patch("/demand/forecasts/{forecast_id}/approve")
 async def approve_demand_forecast(
     forecast_id: UUID,
-    _user: CurrentUser = Depends(require_roles("superadmin", "admin", "gerencia")),
+    _user: CurrentUser = Depends(require_roles("superadmin", "gerencia")),
 ):
     admin = supabase_admin()
     result = (
@@ -227,6 +346,17 @@ async def approve_demand_forecast(
     else:
         admin.table("stock").insert(stock_payload).execute()
     return forecast
+
+
+@router.delete("/demand/forecasts/{forecast_id}")
+async def delete_demand_forecast(
+    forecast_id: UUID,
+    _user: CurrentUser = Depends(require_roles("superadmin")),
+):
+    result = supabase_admin().table("ml_predicciones_demanda").delete().eq("id", str(forecast_id)).execute()
+    if not result.data:
+        raise HTTPException(404, "Prediccion no encontrada")
+    return {"detail": "Prediccion eliminada", "id": str(forecast_id)}
 
 
 @router.post("/providers/score", response_model=ProviderScoreOut)

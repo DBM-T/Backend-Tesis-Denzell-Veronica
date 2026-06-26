@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     # Machine Learning
     ml_models_dir: str = "./ml_models"
     xgboost_model_path: str = "./ml_models/xgboost_demanda.joblib"
+    xgboost_lead_time_model_path: str = "./ml_models/xgboost_lead_time.joblib"
+    lead_time_dataset_path: str = "./data/processed/dataset_lead_time_clean.csv"
     lightgbm_model_path: str = "./ml_models/lightgbm_prioridad.joblib"
 
     # App

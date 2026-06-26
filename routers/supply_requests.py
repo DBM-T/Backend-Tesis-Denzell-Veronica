@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from auth import CurrentUser, get_current_user, require_roles
 from database import supabase_admin
 from schemas.supply_request import SupplyRequestCreate, SupplyRequestOut, SupplyRequestStatusUpdate
+from services.access_control import ensure_action, ensure_payload_scope, ensure_row_access, fetch_row, filter_rows
 from services.postgrest_utils import relation_one
 
 router = APIRouter()
@@ -20,17 +21,19 @@ async def list_requests(
     offset: int = 0,
     _user: CurrentUser = Depends(get_current_user),
 ):
+    ensure_action(_user, "requisiciones_compra", "read")
     query = supabase_admin().table("requisiciones_compra").select("*")
     if estado:
         query = query.eq("estado", estado)
     if sede_id:
         query = query.eq("sede_id", str(sede_id))
     result = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
-    return result.data or []
+    return filter_rows(_user, "requisiciones_compra", result.data or [])
 
 
 @router.get("/active")
 async def active_panel(_user: CurrentUser = Depends(get_current_user)):
+    ensure_action(_user, "requisiciones_compra", "read")
     result = (
         supabase_admin()
         .table("requisiciones_compra")
@@ -55,8 +58,10 @@ async def active_panel(_user: CurrentUser = Depends(get_current_user)):
 @router.post("", response_model=SupplyRequestOut, status_code=201)
 async def create_request(
     body: SupplyRequestCreate,
-    user: CurrentUser = Depends(require_roles("superadmin", "admin", "logistica", "almacen", "almacen_senior")),
+    user: CurrentUser = Depends(get_current_user),
 ):
+    ensure_action(user, "requisiciones_compra", "create")
+    ensure_payload_scope(user, "requisiciones_compra", body.model_dump())
     admin = supabase_admin()
     header = (
         admin.table("requisiciones_compra")
@@ -95,12 +100,34 @@ async def create_request(
     return request_row
 
 
+@router.patch("/{request_id}", response_model=SupplyRequestOut)
+async def update_request(
+    request_id: UUID,
+    payload: dict,
+    user: CurrentUser = Depends(get_current_user),
+):
+    ensure_action(user, "requisiciones_compra", "update")
+    current = ensure_row_access(user, "requisiciones_compra", fetch_row("requisiciones_compra", str(request_id)))
+    ensure_payload_scope(user, "requisiciones_compra", {**current, **payload})
+    result = (
+        supabase_admin()
+        .table("requisiciones_compra")
+        .update(payload)
+        .eq("id", str(request_id))
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(404, "Requisicion no encontrada")
+    return result.data[0]
+
+
 @router.patch("/{request_id}/status", response_model=SupplyRequestOut)
 async def update_status(
     request_id: UUID,
     body: SupplyRequestStatusUpdate,
     user: CurrentUser = Depends(require_roles("superadmin", "admin", "logistica", "gerencia")),
 ):
+    ensure_action(user, "requisiciones_compra", "approve" if body.estado == "aprobada" else "update")
     payload = {"estado": body.estado}
     if body.observaciones is not None:
         payload["observaciones"] = body.observaciones
@@ -120,23 +147,31 @@ async def update_status(
     return result.data[0]
 
 
-@router.get("/{request_id}", response_model=SupplyRequestOut)
-async def get_request(request_id: UUID, _user: CurrentUser = Depends(get_current_user)):
+@router.delete("/{request_id}")
+async def delete_request(
+    request_id: UUID,
+    user: CurrentUser = Depends(get_current_user),
+):
+    ensure_action(user, "requisiciones_compra", "delete")
+    ensure_row_access(user, "requisiciones_compra", fetch_row("requisiciones_compra", str(request_id)))
     result = (
-        supabase_admin()
-        .table("requisiciones_compra")
-        .select("*")
-        .eq("id", str(request_id))
-        .limit(1)
-        .execute()
+        supabase_admin().table("requisiciones_compra").delete().eq("id", str(request_id)).execute()
     )
     if not result.data:
         raise HTTPException(404, "Requisicion no encontrada")
-    return result.data[0]
+    return {"detail": "Requisicion eliminada", "id": str(request_id)}
+
+
+@router.get("/{request_id}", response_model=SupplyRequestOut)
+async def get_request(request_id: UUID, _user: CurrentUser = Depends(get_current_user)):
+    ensure_action(_user, "requisiciones_compra", "read")
+    return ensure_row_access(_user, "requisiciones_compra", fetch_row("requisiciones_compra", str(request_id)))
 
 
 @router.get("/{request_id}/lines")
 async def get_request_lines(request_id: UUID, _user: CurrentUser = Depends(get_current_user)):
+    ensure_action(_user, "requisicion_lineas", "read")
+    ensure_row_access(_user, "requisiciones_compra", fetch_row("requisiciones_compra", str(request_id)))
     result = (
         supabase_admin()
         .table("requisicion_lineas")
@@ -151,4 +186,43 @@ async def get_request_lines(request_id: UUID, _user: CurrentUser = Depends(get_c
         row["sku_padre"] = producto.get("sku_padre")
         row["producto"] = producto.get("nombre")
         rows.append(row)
-    return rows
+    return filter_rows(_user, "requisicion_lineas", rows)
+
+
+@router.post("/{request_id}/lines", status_code=201)
+async def create_request_line(
+    request_id: UUID,
+    payload: dict,
+    user: CurrentUser = Depends(get_current_user),
+):
+    ensure_action(user, "requisicion_lineas", "create")
+    ensure_row_access(user, "requisiciones_compra", fetch_row("requisiciones_compra", str(request_id)))
+    payload["requisicion_id"] = str(request_id)
+    result = supabase_admin().table("requisicion_lineas").insert(payload).execute()
+    if not result.data:
+        raise HTTPException(500, "No se pudo crear la linea de requisicion")
+    return result.data[0]
+
+
+@router.patch("/lines/{line_id}")
+async def update_request_line(
+    line_id: UUID,
+    payload: dict,
+    user: CurrentUser = Depends(get_current_user),
+):
+    ensure_action(user, "requisicion_lineas", "update")
+    ensure_row_access(user, "requisicion_lineas", fetch_row("requisicion_lineas", str(line_id)))
+    result = supabase_admin().table("requisicion_lineas").update(payload).eq("id", str(line_id)).execute()
+    if not result.data:
+        raise HTTPException(404, "Linea no encontrada")
+    return result.data[0]
+
+
+@router.delete("/lines/{line_id}")
+async def delete_request_line(line_id: UUID, user: CurrentUser = Depends(get_current_user)):
+    ensure_action(user, "requisicion_lineas", "delete")
+    ensure_row_access(user, "requisicion_lineas", fetch_row("requisicion_lineas", str(line_id)))
+    result = supabase_admin().table("requisicion_lineas").delete().eq("id", str(line_id)).execute()
+    if not result.data:
+        raise HTTPException(404, "Linea no encontrada")
+    return {"detail": "Linea eliminada", "id": str(line_id)}

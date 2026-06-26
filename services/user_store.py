@@ -3,6 +3,11 @@ from typing import Any
 
 from database import supabase_admin
 
+USER_SELECT = (
+    "id, nombre_completo, email, role_id, sede_id, activo, is_superuser, "
+    "telefono, avatar_url, created_at, updated_at, roles(nombre, permisos)"
+)
+
 
 def _normalize_relation(value: Any) -> dict[str, Any]:
     if isinstance(value, list):
@@ -31,10 +36,7 @@ def get_user_context(user_id: str, require_active: bool = True) -> dict[str, Any
     result = (
         supabase_admin()
         .table("usuarios")
-        .select(
-            "id, nombre_completo, email, role_id, sede_id, activo, is_superuser, "
-            "telefono, avatar_url, roles(nombre, permisos)"
-        )
+        .select(USER_SELECT)
         .eq("id", user_id)
         .limit(1)
         .execute()
@@ -46,6 +48,19 @@ def get_user_context(user_id: str, require_active: bool = True) -> dict[str, Any
     if require_active and not row.get("activo", False):
         return None
 
+    return _decorate_user_row(row)
+
+
+def list_user_contexts(*, include_inactive: bool = True) -> list[dict[str, Any]]:
+    query = supabase_admin().table("usuarios").select(USER_SELECT).order("created_at", desc=True)
+    result = query.execute()
+    rows = result.data or []
+    if not include_inactive:
+        rows = [row for row in rows if row.get("activo", False)]
+    return [_decorate_user_row(row) for row in rows]
+
+
+def _decorate_user_row(row: dict[str, Any]) -> dict[str, Any]:
     role_data = _normalize_relation(row.get("roles"))
     row["rol"] = "superadmin" if row.get("is_superuser") else role_data.get("nombre", "")
     row["permisos"] = role_data.get("permisos") or {}
@@ -89,4 +104,3 @@ def sync_usuario_from_auth(
     if user is None:
         raise RuntimeError("No se pudo sincronizar el usuario en la tabla usuarios")
     return user
-

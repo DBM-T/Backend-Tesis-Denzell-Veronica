@@ -7,7 +7,7 @@ from loguru import logger
 
 from config import get_settings
 from database import close_db_pool, init_db_pool
-from routers import auth, dashboard, ml, parts, purchase_orders, supply_requests, users, work_orders
+from routers import auth, core_data, dashboard, ml, parts, purchase_orders, supply_requests, users, work_orders
 
 _s = get_settings()
 
@@ -41,6 +41,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router, prefix="/auth", tags=["Auth"])
+app.include_router(core_data.router, tags=["Datos Base"])
 app.include_router(users.router, prefix="/users", tags=["Usuarios"])
 app.include_router(parts.router, prefix="/parts", tags=["Productos"])
 app.include_router(work_orders.router, prefix="/work-orders", tags=["Ordenes de trabajo"])

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from auth import CurrentUser, get_current_user, require_roles
 from database import supabase_admin
+from services.access_control import ensure_action, ensure_payload_scope, ensure_row_access, fetch_row, filter_rows
 from services.postgrest_utils import relation_one
 
 router = APIRouter()
@@ -39,6 +40,7 @@ async def list_purchase_orders(
     offset: int = 0,
     _user: CurrentUser = Depends(get_current_user),
 ):
+    ensure_action(_user, "ordenes_compra", "read")
     query = supabase_admin().table("ordenes_compra").select("*, proveedores(razon_social)")
     if estado:
         query = query.eq("estado", estado)
@@ -50,7 +52,13 @@ async def list_purchase_orders(
         proveedor = relation_one(row.pop("proveedores", None))
         row["proveedor"] = proveedor.get("razon_social")
         rows.append(row)
-    return rows
+    return filter_rows(_user, "ordenes_compra", rows)
+
+
+@router.get("/{po_id}")
+async def get_purchase_order(po_id: UUID, user: CurrentUser = Depends(get_current_user)):
+    ensure_action(user, "ordenes_compra", "read")
+    return ensure_row_access(user, "ordenes_compra", fetch_row("ordenes_compra", str(po_id)))
 
 
 @router.post("", status_code=201)
@@ -59,6 +67,8 @@ async def create_purchase_order(
     user: CurrentUser = Depends(require_roles("superadmin", "admin", "logistica")),
 ):
     admin = supabase_admin()
+    ensure_action(user, "ordenes_compra", "create")
+    ensure_payload_scope(user, "ordenes_compra", body.model_dump())
     delivery_date = (
         date.fromisoformat(body.fecha_entrega_estimada) if body.fecha_entrega_estimada else None
     )
@@ -98,11 +108,27 @@ async def create_purchase_order(
     return po
 
 
+@router.patch("/{po_id}")
+async def update_purchase_order(
+    po_id: UUID,
+    payload: dict,
+    user: CurrentUser = Depends(get_current_user),
+):
+    ensure_action(user, "ordenes_compra", "update")
+    current = ensure_row_access(user, "ordenes_compra", fetch_row("ordenes_compra", str(po_id)))
+    ensure_payload_scope(user, "ordenes_compra", {**current, **payload})
+    result = supabase_admin().table("ordenes_compra").update(payload).eq("id", str(po_id)).execute()
+    if not result.data:
+        raise HTTPException(404, "Orden de compra no encontrada")
+    return result.data[0]
+
+
 @router.patch("/{po_id}/approve")
 async def approve_order(
     po_id: UUID,
     user: CurrentUser = Depends(require_roles("superadmin", "admin", "gerencia", "logistica")),
 ):
+    ensure_action(user, "ordenes_compra", "approve")
     result = (
         supabase_admin()
         .table("ordenes_compra")
@@ -126,8 +152,10 @@ async def approve_order(
 async def update_order_status(
     po_id: UUID,
     estado: str,
-    _user: CurrentUser = Depends(require_roles("superadmin", "admin", "logistica", "almacen", "almacen_senior")),
+    _user: CurrentUser = Depends(get_current_user),
 ):
+    ensure_action(_user, "ordenes_compra", "update")
+    ensure_row_access(_user, "ordenes_compra", fetch_row("ordenes_compra", str(po_id)))
     result = (
         supabase_admin()
         .table("ordenes_compra")
@@ -141,8 +169,20 @@ async def update_order_status(
     return {"id": row["id"], "po_codigo": row["po_codigo"], "estado": row["estado"]}
 
 
+@router.delete("/{po_id}")
+async def delete_purchase_order(po_id: UUID, user: CurrentUser = Depends(get_current_user)):
+    ensure_action(user, "ordenes_compra", "delete")
+    ensure_row_access(user, "ordenes_compra", fetch_row("ordenes_compra", str(po_id)))
+    result = supabase_admin().table("ordenes_compra").delete().eq("id", str(po_id)).execute()
+    if not result.data:
+        raise HTTPException(404, "Orden de compra no encontrada")
+    return {"detail": "Orden de compra eliminada", "id": str(po_id)}
+
+
 @router.get("/{po_id}/lines")
 async def get_order_lines(po_id: UUID, _user: CurrentUser = Depends(get_current_user)):
+    ensure_action(_user, "oc_lineas", "read")
+    ensure_row_access(_user, "ordenes_compra", fetch_row("ordenes_compra", str(po_id)))
     result = (
         supabase_admin()
         .table("oc_lineas")
@@ -157,4 +197,43 @@ async def get_order_lines(po_id: UUID, _user: CurrentUser = Depends(get_current_
         row["sku_padre"] = producto.get("sku_padre")
         row["producto"] = producto.get("nombre")
         rows.append(row)
-    return rows
+    return filter_rows(_user, "oc_lineas", rows)
+
+
+@router.post("/{po_id}/lines", status_code=201)
+async def create_order_line(
+    po_id: UUID,
+    payload: dict,
+    user: CurrentUser = Depends(get_current_user),
+):
+    ensure_action(user, "oc_lineas", "create")
+    ensure_row_access(user, "ordenes_compra", fetch_row("ordenes_compra", str(po_id)))
+    payload["oc_id"] = str(po_id)
+    result = supabase_admin().table("oc_lineas").insert(payload).execute()
+    if not result.data:
+        raise HTTPException(500, "No se pudo crear la linea de OC")
+    return result.data[0]
+
+
+@router.patch("/lines/{line_id}")
+async def update_order_line(
+    line_id: UUID,
+    payload: dict,
+    user: CurrentUser = Depends(get_current_user),
+):
+    ensure_action(user, "oc_lineas", "update")
+    ensure_row_access(user, "oc_lineas", fetch_row("oc_lineas", str(line_id)))
+    result = supabase_admin().table("oc_lineas").update(payload).eq("id", str(line_id)).execute()
+    if not result.data:
+        raise HTTPException(404, "Linea de OC no encontrada")
+    return result.data[0]
+
+
+@router.delete("/lines/{line_id}")
+async def delete_order_line(line_id: UUID, user: CurrentUser = Depends(get_current_user)):
+    ensure_action(user, "oc_lineas", "delete")
+    ensure_row_access(user, "oc_lineas", fetch_row("oc_lineas", str(line_id)))
+    result = supabase_admin().table("oc_lineas").delete().eq("id", str(line_id)).execute()
+    if not result.data:
+        raise HTTPException(404, "Linea de OC no encontrada")
+    return {"detail": "Linea de OC eliminada", "id": str(line_id)}

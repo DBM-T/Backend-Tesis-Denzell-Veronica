@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from auth import CurrentUser, get_current_user, require_roles
 from database import supabase_admin
 from schemas.part import PartCreate, PartOut, PartUpdate
+from services.access_control import ensure_action
 from services.postgrest_utils import relation_one, sum_decimal
 
 router = APIRouter()
@@ -37,6 +38,7 @@ async def list_parts(
     offset: int = 0,
     _user: CurrentUser = Depends(get_current_user),
 ):
+    ensure_action(_user, "productos", "read")
     query = supabase_admin().table("productos").select(_part_select()).eq("is_active", active)
     if category_id:
         query = query.eq("categoria_id", str(category_id))
@@ -50,6 +52,7 @@ async def list_parts(
 
 @router.get("/{part_id}", response_model=PartOut)
 async def get_part(part_id: UUID, _user: CurrentUser = Depends(get_current_user)):
+    ensure_action(_user, "productos", "read")
     result = (
         supabase_admin()
         .table("productos")
@@ -124,3 +127,20 @@ async def update_part(
         .execute()
     )
     return _serialize_part(fresh.data[0])
+
+
+@router.delete("/{part_id}", status_code=200)
+async def delete_part(
+    part_id: UUID,
+    _user: CurrentUser = Depends(require_roles("superadmin", "admin", "logistica", "almacen_senior")),
+):
+    result = (
+        supabase_admin()
+        .table("productos")
+        .update({"is_active": False})
+        .eq("id", str(part_id))
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(404, "Producto no encontrado")
+    return {"detail": "Producto desactivado", "id": str(part_id)}

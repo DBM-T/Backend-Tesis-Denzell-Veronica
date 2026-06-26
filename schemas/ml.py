@@ -90,3 +90,40 @@ class ProviderScoreOut(BaseModel):
     modelo_version: str | None = None
     componentes_ml: dict[str, Any] | None = None
     calculado_at: datetime
+
+
+class LeadTimePredictionRequest(BaseModel):
+    supplier_id: int | str
+    sede_id: int | str
+    warehouse_id: int | str | None = None
+    product_tmpl_id: int | str | None = None
+    product_qty: Decimal = Field(..., ge=0)
+    price_unit: Decimal | None = Field(None, ge=0)
+    supplier_lead_time_decl: Decimal | None = Field(None, ge=0)
+    supplier_min_qty: Decimal | None = Field(None, ge=0)
+    supplier_price: Decimal | None = Field(None, ge=0)
+    planned_lead_time_days: Decimal | None = None
+    category: str | None = None
+    is_storable: str | bool | None = None
+    is_child_sku: str | bool | None = None
+    date_order: datetime
+    date_approve: datetime
+    date_planned: datetime | None = None
+
+
+class LeadTimePredictionResponse(BaseModel):
+    lead_time_days_pred: Decimal
+    lead_time_days_pred_rounded: int
+    modelo_version: str | None = None
+    target: str = "lead_time_days"
+    metrics: dict[str, Any] | None = None
+    historical_matches_count: int = 0
+    historical_matches_shown: int = 0
+    historical_matches: list[dict[str, Any]] = Field(default_factory=list)
+    insights: dict[str, Any] | None = None
+
+
+class LeadTimeMatchesResponse(BaseModel):
+    total: int
+    shown: int
+    items: list[dict[str, Any]] = Field(default_factory=list)

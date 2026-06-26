@@ -1,0 +1,1211 @@
+-- =============================================================================
+-- SISTEMA DE GESTIÓN DE ABASTECIMIENTO — CALEAND SAC (Clínica Automotriz)
+-- Base de datos: BD-TP1-TESIS  |  Supabase (PostgreSQL)
+-- Versión 3 — Tablas explícitas: roles + usuarios (reemplaza ENUM + profiles)
+--
+-- Tesis: "Sistema Web con Algoritmos LightGBM y XGBoost para Incrementar la
+--         Eficiencia en la Gestión de Abastecimiento en PYMES del Sector
+--         Automotriz de Lima Metropolitana"
+--
+-- CAMBIOS vs v2:
+--   - Eliminado:  CREATE TYPE rol_sistema AS ENUM (...)
+--   - Eliminado:  CREATE TABLE profiles (...)
+--   - Nuevo:      CREATE TABLE roles  (id, nombre, descripcion, permisos JSONB, activo)
+--   - Nuevo:      CREATE TABLE usuarios (id → auth.users, role_id → roles, ...)
+--   - Actualizado: helpers get_my_role(), is_superuser(), get_my_sede()
+--   - Actualizado: trigger handle_new_user() → inserta en usuarios
+--   - Actualizado: todas las FK de profiles(id) → usuarios(id)
+--   - Actualizado: todas las políticas RLS
+--   - Sin cambios: 24 tablas restantes, triggers de negocio, vistas, índices
+-- =============================================================================
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- EXTENSIONES
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- HELPER: updated_at automático
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION trigger_set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- =============================================================================
+-- 01. ROLES, SEDES Y USUARIOS
+-- =============================================================================
+
+-- TABLA 01 — Roles del sistema (reemplaza el ENUM rol_sistema)
+CREATE TABLE roles (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre      TEXT NOT NULL UNIQUE,
+  -- Valores esperados: superadmin, admin, gerencia, logistica,
+  --   almacen, almacen_senior, cotizador, asesor, tecnico, informes
+  descripcion TEXT,
+  permisos    JSONB,          -- reservado para permisos granulares por módulo
+  activo      BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Seed de roles
+INSERT INTO roles (nombre, descripcion) VALUES
+  ('superadmin',     'Único superusuario del sistema — acceso total'),
+  ('admin',          'Administradores adicionales'),
+  ('gerencia',       'Dirección / visión global'),
+  ('logistica',      'Logística, compras y aprobación de POs'),
+  ('almacen',        'Almacén por sede'),
+  ('almacen_senior', 'Almacén con acceso ampliado'),
+  ('cotizador',      'Cotización a proveedores'),
+  ('asesor',         'Comunicación con clientes / citas'),
+  ('tecnico',        'Mecánico / mecatrónico'),
+  ('informes',       'Analista de informes');
+
+-- TABLA 02 — Sedes
+CREATE TABLE sedes (
+  id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre     TEXT NOT NULL,
+  distrito   TEXT NOT NULL,
+  direccion  TEXT,
+  telefono   TEXT,
+  activa     BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO sedes (nombre, distrito, direccion) VALUES
+  ('Chorrillos', 'Chorrillos', 'Cal. Teniente Carlos Jimenez Chavez Nro. 339 Urb. La Campiña'),
+  ('Barranco',   'Barranco',   NULL);
+
+-- TABLA 03 — Usuarios (reemplaza profiles)
+--   id es el mismo UUID que auth.users para integración nativa con Supabase Auth
+CREATE TABLE usuarios (
+  id              UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  nombre_completo TEXT NOT NULL,
+  email           TEXT,                              -- copia de auth.users.email (lectura rápida)
+  role_id         UUID NOT NULL REFERENCES roles(id),
+  sede_id         UUID REFERENCES sedes(id),
+  is_superuser    BOOLEAN NOT NULL DEFAULT FALSE,
+  activo          BOOLEAN NOT NULL DEFAULT TRUE,
+  telefono        TEXT,
+  avatar_url      TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Solo un superusuario en todo el sistema
+CREATE UNIQUE INDEX idx_solo_un_superusuario
+  ON usuarios (is_superuser)
+  WHERE is_superuser = TRUE;
+
+-- Índice para búsquedas por rol
+CREATE INDEX idx_usuarios_role ON usuarios (role_id);
+CREATE INDEX idx_usuarios_sede ON usuarios (sede_id);
+
+CREATE TRIGGER set_updated_at_usuarios
+  BEFORE UPDATE ON usuarios
+  FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- HELPERS DE SESIÓN
+-- Devuelven datos del usuario autenticado (auth.uid())
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Retorna el nombre del rol (TEXT en lugar de ENUM)
+CREATE OR REPLACE FUNCTION get_my_role() RETURNS TEXT AS $$
+  SELECT r.nombre
+  FROM usuarios u
+  JOIN roles r ON r.id = u.role_id
+  WHERE u.id = auth.uid();
+$$ LANGUAGE sql STABLE SECURITY DEFINER;
+
+-- Retorna TRUE si el usuario actual es superusuario
+CREATE OR REPLACE FUNCTION is_superuser() RETURNS BOOLEAN AS $$
+  SELECT COALESCE(is_superuser, FALSE)
+  FROM usuarios
+  WHERE id = auth.uid();
+$$ LANGUAGE sql STABLE SECURITY DEFINER;
+
+-- Retorna la sede_id del usuario actual
+CREATE OR REPLACE FUNCTION get_my_sede() RETURNS UUID AS $$
+  SELECT sede_id
+  FROM usuarios
+  WHERE id = auth.uid();
+$$ LANGUAGE sql STABLE SECURITY DEFINER;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- TRIGGER: crea registro en usuarios al registrar en Supabase Auth
+-- El rol por defecto es 'tecnico' si no se especifica en raw_user_meta_data
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION handle_new_user()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_role_id UUID;
+  v_rol_nombre TEXT;
+BEGIN
+  -- Obtener el nombre de rol del metadata, o usar 'tecnico' por defecto
+  v_rol_nombre := COALESCE(NEW.raw_user_meta_data->>'rol', 'tecnico');
+
+  -- Buscar el id del rol correspondiente
+  SELECT id INTO v_role_id FROM roles WHERE nombre = v_rol_nombre;
+
+  -- Si el rol no existe, caer a 'tecnico'
+  IF v_role_id IS NULL THEN
+    SELECT id INTO v_role_id FROM roles WHERE nombre = 'tecnico';
+  END IF;
+
+  INSERT INTO public.usuarios (id, nombre_completo, email, role_id)
+  VALUES (
+    NEW.id,
+    COALESCE(NEW.raw_user_meta_data->>'nombre_completo', NEW.email),
+    NEW.email,
+    v_role_id
+  );
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION handle_new_user();
+
+-- =============================================================================
+-- 02. CLIENTES Y VEHÍCULOS
+-- =============================================================================
+
+-- TABLA 04
+CREATE TABLE clientes (
+  id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre     TEXT NOT NULL,
+  dni_ruc    TEXT UNIQUE,
+  telefono   TEXT,
+  email      TEXT,
+  direccion  TEXT,
+  activo     BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER set_updated_at_clientes
+  BEFORE UPDATE ON clientes
+  FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+-- TABLA 05
+CREATE TABLE vehiculos (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  cliente_id  UUID NOT NULL REFERENCES clientes(id),
+  placa       TEXT NOT NULL UNIQUE,
+  marca       TEXT NOT NULL,
+  modelo      TEXT NOT NULL,
+  anio        SMALLINT,
+  color       TEXT,
+  tipo_motor  TEXT,
+  kilometraje INTEGER,
+  activo      BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER set_updated_at_vehiculos
+  BEFORE UPDATE ON vehiculos
+  FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+-- =============================================================================
+-- 03. CATÁLOGO DE PRODUCTOS
+-- =============================================================================
+
+-- TABLA 06
+CREATE TABLE categorias_producto (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre      TEXT NOT NULL UNIQUE,
+  descripcion TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO categorias_producto (nombre) VALUES
+  ('Filtros'), ('Lubricantes'), ('Frenos'), ('Suspensión'),
+  ('Motor'), ('Transmisión'), ('Eléctrico'), ('Climatización'),
+  ('Consumibles'), ('Diagnóstico');
+
+-- TABLA 07
+CREATE TABLE productos (
+  id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  sku_padre             TEXT NOT NULL UNIQUE,
+  nombre                TEXT NOT NULL,
+  descripcion           TEXT,
+  categoria_id          UUID REFERENCES categorias_producto(id),
+  marca                 TEXT,
+  codigo_fabricante     TEXT,
+  unidad_medida         TEXT NOT NULL DEFAULT 'UND',
+  vehiculos_compatibles JSONB,
+  -- Ejemplo: [{"marca":"Toyota","modelo":"Yaris","anio_desde":2015,"anio_hasta":2023}]
+  is_storable           BOOLEAN NOT NULL DEFAULT TRUE,
+  is_active             BOOLEAN NOT NULL DEFAULT TRUE,
+  precio_referencia     NUMERIC(12,2),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER set_updated_at_productos
+  BEFORE UPDATE ON productos
+  FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+CREATE INDEX idx_vehiculos_compatibles ON productos USING GIN (vehiculos_compatibles);
+
+-- =============================================================================
+-- 04. PROVEEDORES (M2)
+-- =============================================================================
+
+CREATE TYPE tipo_proveedor   AS ENUM ('OEM', 'Aftermarket', 'Distribuidor', 'Importador');
+CREATE TYPE estado_proveedor AS ENUM ('activo', 'inactivo', 'suspendido', 'en_evaluacion');
+
+-- TABLA 08
+CREATE TABLE proveedores (
+  id                           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  ruc                          TEXT NOT NULL UNIQUE,
+  razon_social                 TEXT NOT NULL,
+  nombre_comercial             TEXT,
+  tipo                         tipo_proveedor NOT NULL DEFAULT 'Distribuidor',
+  estado                       estado_proveedor NOT NULL DEFAULT 'en_evaluacion',
+  homologado                   BOOLEAN NOT NULL DEFAULT FALSE,
+  contacto_nombre              TEXT,
+  telefono                     TEXT,
+  email                        TEXT,
+  direccion                    TEXT,
+  pais                         TEXT NOT NULL DEFAULT 'Perú',
+  tiempo_entrega_promedio_dias INTEGER,
+  contrato_fecha_inicio        DATE,
+  contrato_fecha_fin           DATE,
+  contrato_condiciones         TEXT,
+  contrato_url                 TEXT,
+  -- [{"tipo":"RUC","url":"...","vencimiento":"2026-12-31"}]
+  documentos                   JSONB,
+  observaciones                TEXT,
+  created_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER set_updated_at_proveedores
+  BEFORE UPDATE ON proveedores
+  FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+-- TABLA 09 — Catálogo de precios
+CREATE TABLE catalogo_precios (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  proveedor_id  UUID NOT NULL REFERENCES proveedores(id) ON DELETE CASCADE,
+  producto_id   UUID NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+  precio_costo  NUMERIC(12,2) NOT NULL,
+  moneda        TEXT NOT NULL DEFAULT 'PEN',
+  vigente_desde DATE NOT NULL DEFAULT CURRENT_DATE,
+  vigente_hasta DATE,
+  activo        BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (proveedor_id, producto_id, vigente_desde)
+);
+
+-- TABLA 10 — Métricas de proveedor
+CREATE TABLE proveedor_metricas (
+  id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  proveedor_id          UUID NOT NULL REFERENCES proveedores(id) ON DELETE CASCADE,
+  periodo               TEXT NOT NULL,        -- '2025-Q2'
+  entregas_a_tiempo_pct NUMERIC(5,2),
+  tasa_defectos_pct     NUMERIC(5,2),
+  score_total_ml        NUMERIC(5,2),         -- calculado por XGBoost
+  ranking               INTEGER,
+  modelo_version        TEXT,
+  componentes_ml        JSONB,
+  calculado_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (proveedor_id, periodo)
+);
+
+-- =============================================================================
+-- 05. CITAS Y ÓRDENES DE TRABAJO
+-- =============================================================================
+
+CREATE TYPE estado_cita AS ENUM (
+  'programada','confirmada','en_espera','atendida','cancelada','no_asistio'
+);
+
+-- TABLA 11
+CREATE TABLE citas (
+  id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  sede_id        UUID NOT NULL REFERENCES sedes(id),
+  cliente_id     UUID NOT NULL REFERENCES clientes(id),
+  vehiculo_id    UUID NOT NULL REFERENCES vehiculos(id),
+  asesor_id      UUID REFERENCES usuarios(id),          -- ← usuarios (antes profiles)
+  fecha_hora     TIMESTAMPTZ NOT NULL,
+  servicio_tag   TEXT,
+  adelanto_20pct BOOLEAN NOT NULL DEFAULT FALSE,
+  monto_adelanto NUMERIC(10,2),
+  estado         estado_cita NOT NULL DEFAULT 'programada',
+  observaciones  TEXT,
+  created_by     UUID REFERENCES usuarios(id),          -- ← usuarios
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER set_updated_at_citas
+  BEFORE UPDATE ON citas
+  FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+CREATE TYPE estado_ot    AS ENUM (
+  'pending_assignment','assigned','in_progress',
+  'waiting_parts','tech_completed','report_pending','completed','cancelada'
+);
+CREATE TYPE prioridad_ot AS ENUM ('alta', 'baja');
+
+-- TABLA 12
+CREATE TABLE ordenes_trabajo (
+  id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  ot_codigo             TEXT NOT NULL UNIQUE
+                          DEFAULT 'OT-' || TO_CHAR(NOW(),'YYYYMMDD') || '-'
+                            || UPPER(SUBSTR(uuid_generate_v4()::TEXT,1,6)),
+  cita_id               UUID REFERENCES citas(id),
+  sede_id               UUID NOT NULL REFERENCES sedes(id),
+  vehiculo_id           UUID NOT NULL REFERENCES vehiculos(id),
+  tecnico_id            UUID REFERENCES usuarios(id),   -- ← usuarios
+  estado                estado_ot NOT NULL DEFAULT 'pending_assignment',
+  prioridad             prioridad_ot,
+  prioridad_ml          prioridad_ot,
+  prioridad_confianza   NUMERIC(4,3),
+  prioridad_ml_version  TEXT,
+  diagnostico_inicial   TEXT,
+  diagnostico_final     TEXT,
+  km_ingreso            INTEGER,
+  tiempo_estimado_horas NUMERIC(4,1),
+  fecha_inicio          TIMESTAMPTZ,
+  fecha_fin             TIMESTAMPTZ,
+  created_by            UUID REFERENCES usuarios(id),   -- ← usuarios
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER set_updated_at_ot
+  BEFORE UPDATE ON ordenes_trabajo
+  FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+CREATE TYPE estado_linea_ot AS ENUM ('borrador','solicitada','aprobada','entregada','rechazada');
+
+-- TABLA 13
+CREATE TABLE ot_lineas (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  ot_id           UUID NOT NULL REFERENCES ordenes_trabajo(id) ON DELETE CASCADE,
+  producto_id     UUID REFERENCES productos(id),
+  descripcion     TEXT NOT NULL,
+  qty             NUMERIC(10,3) NOT NULL DEFAULT 1,
+  precio_unitario NUMERIC(12,2),
+  estado          estado_linea_ot NOT NULL DEFAULT 'borrador',
+  es_adicional    BOOLEAN NOT NULL DEFAULT FALSE,
+  reserva_ref_id  UUID,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =============================================================================
+-- 06. INVENTARIO (M4)
+-- =============================================================================
+
+-- TABLA 14
+CREATE TABLE stock (
+  id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  producto_id      UUID NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+  sede_id          UUID NOT NULL REFERENCES sedes(id) ON DELETE CASCADE,
+  qty_disponible   NUMERIC(12,3) NOT NULL DEFAULT 0,
+  qty_reservada    NUMERIC(12,3) NOT NULL DEFAULT 0,
+  qty_en_transito  NUMERIC(12,3) NOT NULL DEFAULT 0,
+  stock_min        NUMERIC(12,3) NOT NULL DEFAULT 0,
+  stock_max        NUMERIC(12,3),
+  stock_seguridad  NUMERIC(12,3) NOT NULL DEFAULT 0,
+  rop              NUMERIC(12,3),
+  params_ml        BOOLEAN NOT NULL DEFAULT FALSE,
+  modelo_version   TEXT,
+  ubicacion        TEXT,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (producto_id, sede_id)
+);
+
+CREATE TRIGGER set_updated_at_stock
+  BEFORE UPDATE ON stock
+  FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+CREATE VIEW v_stock_virtual AS
+SELECT
+  s.*,
+  (s.qty_disponible - s.qty_reservada + s.qty_en_transito) AS qty_virtual,
+  CASE
+    WHEN s.qty_disponible = 0                              THEN 'quiebre'
+    WHEN s.qty_disponible < s.stock_min                    THEN 'bajo_minimo'
+    WHEN s.qty_disponible > COALESCE(s.stock_max, 999999)  THEN 'exceso'
+    ELSE 'normal'
+  END AS estado_stock,
+  p.sku_padre,
+  p.nombre AS producto,
+  sd.nombre AS sede
+FROM stock s
+JOIN productos p ON p.id = s.producto_id
+JOIN sedes sd    ON sd.id = s.sede_id;
+
+CREATE TYPE tipo_movimiento AS ENUM (
+  'entrada_compra','salida_ot','reserva','liberacion_reserva',
+  'ajuste_positivo','ajuste_negativo','traslado_salida','traslado_entrada'
+);
+
+-- TABLA 15
+CREATE TABLE stock_movimientos (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  producto_id     UUID NOT NULL REFERENCES productos(id),
+  sede_id         UUID NOT NULL REFERENCES sedes(id),
+  tipo            tipo_movimiento NOT NULL,
+  qty             NUMERIC(12,3) NOT NULL,
+  qty_antes       NUMERIC(12,3) NOT NULL,
+  qty_despues     NUMERIC(12,3) NOT NULL,
+  referencia_tipo TEXT,
+  referencia_id   UUID,
+  observacion     TEXT,
+  created_by      UUID REFERENCES usuarios(id),            -- ← usuarios
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =============================================================================
+-- 07. COMPRAS (M3)
+-- =============================================================================
+
+CREATE TYPE estado_pr AS ENUM (
+  'borrador','pendiente_aprobacion','aprobada','rechazada','cancelada','procesada'
+);
+
+-- TABLA 16
+CREATE TABLE requisiciones_compra (
+  id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  pr_codigo      TEXT NOT NULL UNIQUE
+                   DEFAULT 'PR-' || TO_CHAR(NOW(),'YYYYMMDD') || '-'
+                     || UPPER(SUBSTR(uuid_generate_v4()::TEXT,1,6)),
+  sede_id        UUID NOT NULL REFERENCES sedes(id),
+  ot_id          UUID REFERENCES ordenes_trabajo(id),
+  origen         TEXT NOT NULL DEFAULT 'manual',
+  estado         estado_pr NOT NULL DEFAULT 'pendiente_aprobacion',
+  prioridad      prioridad_ot NOT NULL DEFAULT 'baja',
+  observaciones  TEXT,
+  solicitado_por UUID NOT NULL REFERENCES usuarios(id),    -- ← usuarios
+  aprobado_por   UUID REFERENCES usuarios(id),             -- ← usuarios
+  aprobado_at    TIMESTAMPTZ,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER set_updated_at_pr
+  BEFORE UPDATE ON requisiciones_compra
+  FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+-- TABLA 17
+CREATE TABLE requisicion_lineas (
+  id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  requisicion_id        UUID NOT NULL REFERENCES requisiciones_compra(id) ON DELETE CASCADE,
+  producto_id           UUID NOT NULL REFERENCES productos(id),
+  qty_solicitada        NUMERIC(12,3) NOT NULL,
+  qty_aprobada          NUMERIC(12,3),
+  proveedor_sugerido_id UUID REFERENCES proveedores(id),
+  precio_estimado       NUMERIC(12,2),
+  observaciones         TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TYPE estado_rfq AS ENUM ('enviada','respondida','vencida','cancelada','seleccionada');
+
+-- TABLA 18
+CREATE TABLE cotizaciones_rfq (
+  id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  rfq_codigo            TEXT NOT NULL UNIQUE
+                          DEFAULT 'RFQ-' || TO_CHAR(NOW(),'YYYYMMDD') || '-'
+                            || UPPER(SUBSTR(uuid_generate_v4()::TEXT,1,6)),
+  requisicion_id        UUID REFERENCES requisiciones_compra(id),
+  proveedor_id          UUID NOT NULL REFERENCES proveedores(id),
+  producto_id           UUID NOT NULL REFERENCES productos(id),
+  sede_id               UUID NOT NULL REFERENCES sedes(id),
+  estado                estado_rfq NOT NULL DEFAULT 'enviada',
+  fecha_envio           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  fecha_vencimiento     TIMESTAMPTZ,
+  precio_costo          NUMERIC(12,2),
+  precio_venta_sugerido NUMERIC(12,2),
+  tiempo_entrega_dias   INTEGER,
+  moneda                TEXT NOT NULL DEFAULT 'PEN',
+  observaciones         TEXT,
+  fecha_respuesta       TIMESTAMPTZ,
+  seleccionada          BOOLEAN NOT NULL DEFAULT FALSE,
+  created_by            UUID REFERENCES usuarios(id),      -- ← usuarios
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TYPE estado_oc    AS ENUM (
+  'borrador','enviada','confirmada','recibida_parcial','recibida','cancelada'
+);
+CREATE TYPE canal_compra AS ENUM ('local','importacion','distribuidor');
+
+-- TABLA 19
+CREATE TABLE ordenes_compra (
+  id                     UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  po_codigo              TEXT NOT NULL UNIQUE
+                           DEFAULT 'PO-' || TO_CHAR(NOW(),'YYYYMMDD') || '-'
+                             || UPPER(SUBSTR(uuid_generate_v4()::TEXT,1,6)),
+  requisicion_id         UUID REFERENCES requisiciones_compra(id),
+  proveedor_id           UUID NOT NULL REFERENCES proveedores(id),
+  sede_id                UUID NOT NULL REFERENCES sedes(id),
+  estado                 estado_oc NOT NULL DEFAULT 'borrador',
+  canal                  canal_compra NOT NULL DEFAULT 'local',
+  canal_sugerido_ml      canal_compra,
+  prioridad              prioridad_ot NOT NULL DEFAULT 'baja',
+  fecha_entrega_estimada DATE,
+  fecha_entrega_real     DATE,
+  subtotal               NUMERIC(14,2) NOT NULL DEFAULT 0,
+  observaciones          TEXT,
+  creado_por             UUID NOT NULL REFERENCES usuarios(id),  -- ← usuarios
+  aprobado_por           UUID REFERENCES usuarios(id),           -- ← usuarios
+  aprobado_at            TIMESTAMPTZ,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER set_updated_at_oc
+  BEFORE UPDATE ON ordenes_compra
+  FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+-- TABLA 20
+CREATE TABLE oc_lineas (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  oc_id           UUID NOT NULL REFERENCES ordenes_compra(id) ON DELETE CASCADE,
+  producto_id     UUID NOT NULL REFERENCES productos(id),
+  qty_pedida      NUMERIC(12,3) NOT NULL,
+  qty_recibida    NUMERIC(12,3) NOT NULL DEFAULT 0,
+  precio_unitario NUMERIC(12,2) NOT NULL,
+  subtotal_linea  NUMERIC(14,2) NOT NULL DEFAULT 0,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =============================================================================
+-- 08. RECEPCIÓN Y CONTROL DE CALIDAD (M5)
+-- =============================================================================
+
+CREATE TYPE estado_recepcion AS ENUM (
+  'pendiente','en_revision','conforme','no_conforme','parcialmente_conforme'
+);
+
+-- TABLA 21
+CREATE TABLE recepciones (
+  id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  recepcion_codigo TEXT NOT NULL UNIQUE
+                     DEFAULT 'REC-' || TO_CHAR(NOW(),'YYYYMMDD') || '-'
+                       || UPPER(SUBSTR(uuid_generate_v4()::TEXT,1,6)),
+  oc_id            UUID NOT NULL REFERENCES ordenes_compra(id),
+  sede_id          UUID NOT NULL REFERENCES sedes(id),
+  estado           estado_recepcion NOT NULL DEFAULT 'pendiente',
+  fecha_recepcion  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  numero_guia      TEXT,
+  fecha_guia       DATE,
+  url_guia         TEXT,
+  created_by       UUID NOT NULL REFERENCES usuarios(id),  -- ← usuarios
+  revisado_por     UUID REFERENCES usuarios(id),           -- ← usuarios
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TRIGGER set_updated_at_recepciones
+  BEFORE UPDATE ON recepciones
+  FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
+-- TABLA 22
+CREATE TABLE recepcion_lineas (
+  id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  recepcion_id   UUID NOT NULL REFERENCES recepciones(id) ON DELETE CASCADE,
+  oc_linea_id    UUID NOT NULL REFERENCES oc_lineas(id),
+  producto_id    UUID NOT NULL REFERENCES productos(id),
+  qty_esperada   NUMERIC(12,3) NOT NULL,
+  qty_recibida   NUMERIC(12,3) NOT NULL DEFAULT 0,
+  sku_verificado BOOLEAN NOT NULL DEFAULT FALSE,
+  conforme       BOOLEAN,
+  observaciones  TEXT,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TYPE tipo_no_conformidad AS ENUM (
+  'sku_incorrecto','qty_incorrecta','dano_fisico','vencido','otro'
+);
+CREATE TYPE estado_nc AS ENUM ('abierta','en_gestion','resuelta','cerrada');
+
+-- TABLA 23
+CREATE TABLE no_conformidades (
+  id                   UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  recepcion_linea_id   UUID NOT NULL REFERENCES recepcion_lineas(id) ON DELETE CASCADE,
+  tipo                 tipo_no_conformidad NOT NULL,
+  descripcion          TEXT NOT NULL,
+  evidencia_urls       TEXT[],
+  estado               estado_nc NOT NULL DEFAULT 'abierta',
+  proveedor_notificado BOOLEAN NOT NULL DEFAULT FALSE,
+  proveedor_notif_at   TIMESTAMPTZ,
+  resuelta_at          TIMESTAMPTZ,
+  created_by           UUID REFERENCES usuarios(id),      -- ← usuarios
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =============================================================================
+-- 09. MÓDULO ML (M1)
+-- =============================================================================
+
+-- TABLA 24
+CREATE TABLE ml_modelos (
+  id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre              TEXT NOT NULL,
+  tipo                TEXT NOT NULL,    -- 'xgboost' | 'lightgbm'
+  proposito           TEXT NOT NULL,    -- 'demanda' | 'prioridad' | 'lead_time' | 'score_proveedor'
+  version             TEXT NOT NULL,
+  fecha_entrenamiento TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  metricas            JSONB,
+  hiperparametros     JSONB,
+  activo              BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO ml_modelos (nombre, tipo, proposito, version, activo, metricas) VALUES
+  ('XGBoost Demanda v0',    'xgboost',  'demanda',         '0.0.1', FALSE, '{"mape":null,"rmse":null}'),
+  ('LightGBM Prioridad v0', 'lightgbm', 'prioridad',       '0.0.1', FALSE, '{"accuracy":null,"f1":null}'),
+  ('XGBoost Lead Time v0',  'xgboost',  'lead_time',       '0.0.1', FALSE, '{"mae":null}'),
+  ('XGBoost Score Prov v0', 'xgboost',  'score_proveedor', '0.0.1', FALSE, '{"mse":null}');
+
+-- TABLA 25
+CREATE TABLE ml_predicciones_demanda (
+  id                       UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  producto_id              UUID NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+  sede_id                  UUID NOT NULL REFERENCES sedes(id) ON DELETE CASCADE,
+  modelo_id                UUID REFERENCES ml_modelos(id),
+  periodo_inicio           DATE NOT NULL,
+  periodo_fin              DATE NOT NULL,
+  horizonte_dias           INTEGER NOT NULL,
+  qty_predicha             NUMERIC(12,3) NOT NULL,
+  intervalo_inf            NUMERIC(12,3),
+  intervalo_sup            NUMERIC(12,3),
+  rop_calculado            NUMERIC(12,3),
+  stock_seguridad_sugerido NUMERIC(12,3),
+  aprobado_por_gerencia    BOOLEAN NOT NULL DEFAULT FALSE,
+  aprobado_at              TIMESTAMPTZ,
+  created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- TABLA 26
+CREATE TABLE historial_consumo (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  producto_id     UUID NOT NULL REFERENCES productos(id),
+  sede_id         UUID NOT NULL REFERENCES sedes(id),
+  fecha           DATE NOT NULL,
+  qty_consumida   NUMERIC(12,3) NOT NULL,
+  ot_id           UUID REFERENCES ordenes_trabajo(id),
+  tipo_servicio   TEXT,
+  marca_vehiculo  TEXT,
+  modelo_vehiculo TEXT,
+  anio_vehiculo   SMALLINT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =============================================================================
+-- 10. NOTIFICACIONES
+-- =============================================================================
+
+CREATE TYPE tipo_notificacion AS ENUM (
+  'ot_waiting_parts', 'pr_pendiente', 'po_confirmada', 'po_recibida',
+  'no_conformidad',   'forecast_listo', 'score_proveedor',
+  'alerta_quiebre',   'alerta_bajo_minimo', 'alerta_stock_muerto',
+  'alerta_exceso',    'alerta_vencimiento'
+);
+
+-- TABLA 27
+CREATE TABLE notificaciones (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  usuario_id      UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,  -- ← usuarios
+  tipo            tipo_notificacion NOT NULL,
+  titulo          TEXT NOT NULL,
+  mensaje         TEXT,
+  referencia_tipo TEXT,
+  referencia_id   UUID,
+  qty_actual      NUMERIC(12,3),
+  qty_referencia  NUMERIC(12,3),
+  dias_sin_movimiento INTEGER,
+  leida           BOOLEAN NOT NULL DEFAULT FALSE,
+  leida_at        TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =============================================================================
+-- 11. ÍNDICES
+-- =============================================================================
+
+CREATE INDEX idx_stock_prod_sede      ON stock (producto_id, sede_id);
+CREATE INDEX idx_stock_mov_prod       ON stock_movimientos (producto_id, sede_id, created_at DESC);
+CREATE INDEX idx_ot_estado            ON ordenes_trabajo (estado, sede_id);
+CREATE INDEX idx_ot_vehiculo          ON ordenes_trabajo (vehiculo_id);
+CREATE INDEX idx_ot_tecnico           ON ordenes_trabajo (tecnico_id);
+CREATE INDEX idx_pr_estado            ON requisiciones_compra (estado, sede_id);
+CREATE INDEX idx_pr_ot                ON requisiciones_compra (ot_id);
+CREATE INDEX idx_oc_estado            ON ordenes_compra (estado, sede_id);
+CREATE INDEX idx_oc_proveedor         ON ordenes_compra (proveedor_id);
+CREATE INDEX idx_rfq_requisicion      ON cotizaciones_rfq (requisicion_id);
+CREATE INDEX idx_recepcion_oc         ON recepciones (oc_id);
+CREATE INDEX idx_forecast_prod_sede   ON ml_predicciones_demanda (producto_id, sede_id, periodo_inicio);
+CREATE INDEX idx_historial            ON historial_consumo (producto_id, sede_id, fecha DESC);
+CREATE INDEX idx_notif_usuario        ON notificaciones (usuario_id, leida, created_at DESC);
+CREATE INDEX idx_catalogo_prov_prod   ON catalogo_precios (proveedor_id, producto_id, activo);
+CREATE INDEX idx_metricas_proveedor   ON proveedor_metricas (proveedor_id, periodo);
+
+-- =============================================================================
+-- 12. ROW LEVEL SECURITY (RLS)
+-- =============================================================================
+
+ALTER TABLE roles                    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sedes                    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usuarios                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE clientes                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE vehiculos                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE categorias_producto      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE productos                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE proveedores              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE catalogo_precios         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE proveedor_metricas       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE citas                    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ordenes_trabajo          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ot_lineas                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE stock                    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE stock_movimientos        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE requisiciones_compra     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE requisicion_lineas       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cotizaciones_rfq         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ordenes_compra           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE oc_lineas                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE recepciones              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE recepcion_lineas         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE no_conformidades         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ml_modelos               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ml_predicciones_demanda  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE historial_consumo        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE notificaciones           ENABLE ROW LEVEL SECURITY;
+
+-- ── ROLES (tabla) ── todos pueden leer, solo superadmin escribe
+CREATE POLICY "roles_lectura_todos"
+  ON roles FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "roles_escritura_superadmin"
+  ON roles FOR ALL USING (is_superuser());
+
+-- ── SEDES ──
+CREATE POLICY "sedes_lectura_todos"
+  ON sedes FOR SELECT USING (TRUE);
+CREATE POLICY "sedes_escritura_admin"
+  ON sedes FOR ALL USING (get_my_role() IN ('superadmin','admin'));
+
+-- ── USUARIOS (reemplaza policies de profiles) ──
+CREATE POLICY "usuarios_ver_propio"
+  ON usuarios FOR SELECT USING (id = auth.uid());
+CREATE POLICY "usuarios_admin_ve_todos"
+  ON usuarios FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia'));
+CREATE POLICY "usuarios_superadmin_todo"
+  ON usuarios FOR ALL USING (is_superuser());
+
+-- ── CLIENTES ──
+CREATE POLICY "clientes_lectura_interna"
+  ON clientes FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "clientes_escritura_asesor"
+  ON clientes FOR INSERT
+  WITH CHECK (get_my_role() IN ('superadmin','admin','asesor','gerencia'));
+CREATE POLICY "clientes_update_asesor"
+  ON clientes FOR UPDATE
+  USING (get_my_role() IN ('superadmin','admin','asesor','gerencia'));
+
+-- ── VEHÍCULOS ──
+CREATE POLICY "vehiculos_lectura_interna"
+  ON vehiculos FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "vehiculos_escritura_asesor"
+  ON vehiculos FOR INSERT
+  WITH CHECK (get_my_role() IN ('superadmin','admin','asesor','gerencia'));
+
+-- ── PRODUCTOS / CATÁLOGO ──
+CREATE POLICY "productos_lectura_todos"
+  ON productos FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "productos_escritura_logistica"
+  ON productos FOR ALL
+  USING (get_my_role() IN ('superadmin','admin','logistica','almacen_senior'));
+CREATE POLICY "categorias_lectura"
+  ON categorias_producto FOR SELECT USING (auth.uid() IS NOT NULL);
+CREATE POLICY "categorias_escritura_admin"
+  ON categorias_producto FOR ALL
+  USING (get_my_role() IN ('superadmin','admin'));
+
+-- ── PROVEEDORES ──
+CREATE POLICY "proveedores_lectura_roles"
+  ON proveedores FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia','logistica','cotizador','almacen_senior'));
+CREATE POLICY "proveedores_escritura_logistica"
+  ON proveedores FOR ALL
+  USING (get_my_role() IN ('superadmin','admin','logistica'));
+CREATE POLICY "catalogo_lectura"
+  ON catalogo_precios FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','logistica','cotizador','almacen','almacen_senior'));
+CREATE POLICY "catalogo_escritura_logistica"
+  ON catalogo_precios FOR ALL
+  USING (get_my_role() IN ('superadmin','admin','logistica'));
+CREATE POLICY "metricas_lectura"
+  ON proveedor_metricas FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia','logistica'));
+
+-- ── CITAS ──
+CREATE POLICY "citas_lectura_sede"
+  ON citas FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia') OR sede_id = get_my_sede());
+CREATE POLICY "citas_escritura_asesor"
+  ON citas FOR INSERT
+  WITH CHECK (get_my_role() IN ('superadmin','admin','asesor','gerencia'));
+CREATE POLICY "citas_update_asesor"
+  ON citas FOR UPDATE
+  USING (get_my_role() IN ('superadmin','admin','asesor','gerencia'));
+
+-- ── ÓRDENES DE TRABAJO ──
+CREATE POLICY "ot_lectura_sede"
+  ON ordenes_trabajo FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia') OR sede_id = get_my_sede());
+CREATE POLICY "ot_insertar"
+  ON ordenes_trabajo FOR INSERT
+  WITH CHECK (get_my_role() IN ('superadmin','admin','asesor','gerencia'));
+CREATE POLICY "ot_update_roles"
+  ON ordenes_trabajo FOR UPDATE
+  USING (
+    get_my_role() IN ('superadmin','admin','gerencia','logistica')
+    OR (get_my_role() = 'tecnico'                          AND tecnico_id = auth.uid())
+    OR (get_my_role() = 'asesor'                           AND sede_id = get_my_sede())
+    OR (get_my_role() IN ('almacen','almacen_senior')      AND sede_id = get_my_sede())
+  );
+CREATE POLICY "ot_lineas_via_ot"
+  ON ot_lineas FOR ALL
+  USING (
+    ot_id IN (
+      SELECT id FROM ordenes_trabajo
+      WHERE get_my_role() IN ('superadmin','admin','gerencia')
+         OR sede_id = get_my_sede()
+         OR tecnico_id = auth.uid()
+    )
+  );
+
+-- ── INVENTARIO ──
+CREATE POLICY "stock_lectura_sede"
+  ON stock FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia','logistica')
+         OR sede_id = get_my_sede());
+CREATE POLICY "stock_escritura_almacen"
+  ON stock FOR ALL
+  USING (get_my_role() IN ('superadmin','admin','logistica')
+         OR (get_my_role() IN ('almacen','almacen_senior') AND sede_id = get_my_sede()));
+CREATE POLICY "stock_mov_lectura"
+  ON stock_movimientos FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia','logistica')
+         OR sede_id = get_my_sede());
+
+-- ── COMPRAS ──
+CREATE POLICY "pr_lectura"
+  ON requisiciones_compra FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia','logistica')
+         OR sede_id = get_my_sede());
+CREATE POLICY "pr_insertar_almacen"
+  ON requisiciones_compra FOR INSERT
+  WITH CHECK (get_my_role() IN ('superadmin','admin','logistica','almacen','almacen_senior'));
+CREATE POLICY "pr_aprobar_logistica"
+  ON requisiciones_compra FOR UPDATE
+  USING (get_my_role() IN ('superadmin','admin','logistica','gerencia'));
+CREATE POLICY "rfq_lectura"
+  ON cotizaciones_rfq FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia','logistica','cotizador'));
+CREATE POLICY "rfq_escritura"
+  ON cotizaciones_rfq FOR ALL
+  USING (get_my_role() IN ('superadmin','admin','logistica','cotizador'));
+CREATE POLICY "oc_lectura"
+  ON ordenes_compra FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia','logistica')
+         OR sede_id = get_my_sede());
+CREATE POLICY "oc_crear_logistica"
+  ON ordenes_compra FOR INSERT
+  WITH CHECK (get_my_role() IN ('superadmin','admin','logistica'));
+CREATE POLICY "oc_aprobar"
+  ON ordenes_compra FOR UPDATE
+  USING (get_my_role() IN ('superadmin','admin','logistica','gerencia'));
+CREATE POLICY "oc_lineas_via_oc"
+  ON oc_lineas FOR ALL
+  USING (oc_id IN (
+    SELECT id FROM ordenes_compra
+    WHERE get_my_role() IN ('superadmin','admin','gerencia','logistica')
+       OR sede_id = get_my_sede()
+  ));
+
+-- ── RECEPCIÓN ──
+CREATE POLICY "recepciones_lectura"
+  ON recepciones FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia','logistica')
+         OR sede_id = get_my_sede());
+CREATE POLICY "recepciones_escritura"
+  ON recepciones FOR ALL
+  USING (get_my_role() IN ('superadmin','admin','logistica')
+         OR (get_my_role() IN ('almacen','almacen_senior') AND sede_id = get_my_sede()));
+CREATE POLICY "no_conf_lectura"
+  ON no_conformidades FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia','logistica','almacen','almacen_senior'));
+CREATE POLICY "recepcion_lineas_via_rec"
+  ON recepcion_lineas FOR ALL
+  USING (recepcion_id IN (
+    SELECT id FROM recepciones
+    WHERE get_my_role() IN ('superadmin','admin','gerencia','logistica')
+       OR sede_id = get_my_sede()
+  ));
+
+-- ── ML ──
+CREATE POLICY "ml_modelos_lectura"
+  ON ml_modelos FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia','logistica'));
+CREATE POLICY "ml_modelos_escritura_admin"
+  ON ml_modelos FOR ALL
+  USING (get_my_role() IN ('superadmin','admin'));
+CREATE POLICY "ml_forecast_lectura"
+  ON ml_predicciones_demanda FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia','logistica'));
+CREATE POLICY "historial_lectura"
+  ON historial_consumo FOR SELECT
+  USING (get_my_role() IN ('superadmin','admin','gerencia','logistica'));
+
+-- ── NOTIFICACIONES ──
+CREATE POLICY "notif_ver_propias"
+  ON notificaciones FOR SELECT USING (usuario_id = auth.uid());
+CREATE POLICY "notif_marcar_leida"
+  ON notificaciones FOR UPDATE USING (usuario_id = auth.uid());
+CREATE POLICY "notif_insertar_sistema"
+  ON notificaciones FOR INSERT
+  WITH CHECK (get_my_role() IN ('superadmin','admin') OR usuario_id = auth.uid());
+
+-- =============================================================================
+-- 13. TRIGGERS DE NEGOCIO
+-- =============================================================================
+
+-- ① OT → waiting_parts dispara PR automáticamente (resuelve B1 y B3)
+CREATE OR REPLACE FUNCTION auto_generar_pr_desde_ot()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.estado = 'waiting_parts' AND OLD.estado <> 'waiting_parts' THEN
+    INSERT INTO requisiciones_compra
+      (sede_id, ot_id, origen, estado, prioridad, solicitado_por)
+    VALUES (
+      NEW.sede_id,
+      NEW.id,
+      'automatico_ot',
+      'pendiente_aprobacion',
+      COALESCE(NEW.prioridad_ml, NEW.prioridad, 'baja'),
+      COALESCE(NEW.tecnico_id, NEW.created_by)
+    );
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER ot_genera_pr_automatica
+  AFTER UPDATE OF estado ON ordenes_trabajo
+  FOR EACH ROW
+  WHEN (NEW.estado = 'waiting_parts')
+  EXECUTE FUNCTION auto_generar_pr_desde_ot();
+
+-- ② Recepción conforme → actualiza stock en tiempo real (resuelve B4)
+CREATE OR REPLACE FUNCTION actualizar_stock_en_recepcion()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_sede_id   UUID;
+  v_qty_antes NUMERIC;
+BEGIN
+  IF NEW.conforme = TRUE AND (OLD.conforme IS NULL OR OLD.conforme = FALSE) THEN
+    SELECT sede_id INTO v_sede_id FROM recepciones WHERE id = NEW.recepcion_id;
+    SELECT qty_disponible INTO v_qty_antes FROM stock
+      WHERE producto_id = NEW.producto_id AND sede_id = v_sede_id;
+
+    INSERT INTO stock (producto_id, sede_id, qty_disponible)
+    VALUES (NEW.producto_id, v_sede_id, NEW.qty_recibida)
+    ON CONFLICT (producto_id, sede_id)
+    DO UPDATE SET
+      qty_disponible  = stock.qty_disponible + NEW.qty_recibida,
+      qty_en_transito = GREATEST(stock.qty_en_transito - NEW.qty_recibida, 0),
+      updated_at      = NOW();
+
+    INSERT INTO stock_movimientos
+      (producto_id, sede_id, tipo, qty, qty_antes, qty_despues, referencia_tipo, referencia_id)
+    VALUES (
+      NEW.producto_id, v_sede_id, 'entrada_compra', NEW.qty_recibida,
+      COALESCE(v_qty_antes, 0),
+      COALESCE(v_qty_antes, 0) + NEW.qty_recibida,
+      'recepcion', NEW.recepcion_id
+    );
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER recepcion_conforme_stock
+  AFTER UPDATE OF conforme ON recepcion_lineas
+  FOR EACH ROW WHEN (NEW.conforme = TRUE)
+  EXECUTE FUNCTION actualizar_stock_en_recepcion();
+
+-- ③ Subtotal de líneas de OC
+CREATE OR REPLACE FUNCTION recalcular_subtotal_oc_linea()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.subtotal_linea = ROUND(NEW.qty_pedida * NEW.precio_unitario, 2);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER oc_linea_calcula_subtotal
+  BEFORE INSERT OR UPDATE ON oc_lineas
+  FOR EACH ROW EXECUTE FUNCTION recalcular_subtotal_oc_linea();
+
+CREATE OR REPLACE FUNCTION recalcular_total_oc()
+RETURNS TRIGGER AS $$
+BEGIN
+  UPDATE ordenes_compra
+  SET subtotal = (SELECT COALESCE(SUM(subtotal_linea),0) FROM oc_lineas WHERE oc_id = NEW.oc_id)
+  WHERE id = NEW.oc_id;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER oc_linea_actualiza_total
+  AFTER INSERT OR UPDATE OR DELETE ON oc_lineas
+  FOR EACH ROW EXECUTE FUNCTION recalcular_total_oc();
+
+-- ④ No conformidad → penaliza score del proveedor
+CREATE OR REPLACE FUNCTION penalizar_score_proveedor()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_proveedor_id UUID;
+  v_periodo      TEXT;
+BEGIN
+  SELECT oc.proveedor_id INTO v_proveedor_id
+  FROM recepcion_lineas rl
+  JOIN recepciones r      ON r.id  = rl.recepcion_id
+  JOIN ordenes_compra oc  ON oc.id = r.oc_id
+  WHERE rl.id = NEW.recepcion_linea_id;
+
+  v_periodo := TO_CHAR(NOW(), 'YYYY-"Q"Q');
+
+  INSERT INTO proveedor_metricas (proveedor_id, periodo, tasa_defectos_pct)
+  VALUES (v_proveedor_id, v_periodo, 1)
+  ON CONFLICT (proveedor_id, periodo)
+  DO UPDATE SET
+    tasa_defectos_pct = COALESCE(proveedor_metricas.tasa_defectos_pct, 0) + 1,
+    calculado_at      = NOW();
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER nc_penaliza_proveedor
+  AFTER INSERT ON no_conformidades
+  FOR EACH ROW EXECUTE FUNCTION penalizar_score_proveedor();
+
+-- =============================================================================
+-- 14. VISTAS
+-- =============================================================================
+
+-- Stock con estado semáforo
+CREATE VIEW v_stock_estado AS
+SELECT
+  p.sku_padre,
+  p.nombre        AS producto,
+  p.marca,
+  sd.nombre       AS sede,
+  s.qty_disponible,
+  s.qty_reservada,
+  s.qty_en_transito,
+  (s.qty_disponible - s.qty_reservada + s.qty_en_transito) AS qty_virtual,
+  s.stock_min,
+  s.stock_max,
+  s.rop,
+  s.stock_seguridad,
+  s.ubicacion,
+  CASE
+    WHEN s.qty_disponible = 0                             THEN 'quiebre'
+    WHEN s.qty_disponible < s.stock_min                   THEN 'bajo_minimo'
+    WHEN s.qty_disponible > COALESCE(s.stock_max,999999)  THEN 'exceso'
+    ELSE 'normal'
+  END AS estado_stock
+FROM stock s
+JOIN productos p ON p.id = s.producto_id
+JOIN sedes sd    ON sd.id = s.sede_id;
+
+-- Trazabilidad OT → PR → PO → Recepción
+CREATE VIEW v_trazabilidad AS
+SELECT
+  ot.ot_codigo,
+  ot.estado           AS estado_ot,
+  ot.prioridad_ml,
+  pr.pr_codigo,
+  pr.estado           AS estado_pr,
+  pr.origen           AS origen_pr,
+  oc.po_codigo,
+  oc.estado           AS estado_oc,
+  oc.canal,
+  pv.razon_social     AS proveedor,
+  r.recepcion_codigo,
+  r.estado            AS estado_recepcion,
+  r.numero_guia,
+  ot.created_at       AS ot_creada,
+  pr.created_at       AS pr_creada,
+  oc.created_at       AS oc_creada,
+  r.fecha_recepcion
+FROM ordenes_trabajo ot
+LEFT JOIN requisiciones_compra pr ON pr.ot_id  = ot.id
+LEFT JOIN ordenes_compra oc       ON oc.requisicion_id = pr.id
+LEFT JOIN proveedores pv          ON pv.id     = oc.proveedor_id
+LEFT JOIN recepciones r           ON r.oc_id   = oc.id;
+
+-- Forecast vigente
+CREATE VIEW v_forecast_vigente AS
+SELECT DISTINCT ON (f.producto_id, f.sede_id)
+  p.sku_padre,
+  p.nombre       AS producto,
+  sd.nombre      AS sede,
+  f.horizonte_dias,
+  f.qty_predicha,
+  f.rop_calculado,
+  f.stock_seguridad_sugerido,
+  f.aprobado_por_gerencia,
+  f.created_at   AS generado_at
+FROM ml_predicciones_demanda f
+JOIN productos p ON p.id  = f.producto_id
+JOIN sedes sd    ON sd.id = f.sede_id
+ORDER BY f.producto_id, f.sede_id, f.created_at DESC;
+
+-- Ranking de proveedores
+CREATE VIEW v_ranking_proveedores AS
+SELECT
+  pv.razon_social,
+  pv.tipo,
+  pv.homologado,
+  pm.periodo,
+  pm.entregas_a_tiempo_pct,
+  pm.tasa_defectos_pct,
+  pm.score_total_ml,
+  pm.ranking
+FROM proveedores pv
+LEFT JOIN proveedor_metricas pm ON pm.proveedor_id = pv.id
+WHERE pm.periodo = TO_CHAR(NOW(), 'YYYY-"Q"Q')
+ORDER BY pm.score_total_ml DESC NULLS LAST;
+
+-- =============================================================================
+-- FIN DEL SCRIPT v3
+-- Base de datos: BD-TP1-TESIS
+-- Tablas: 27 (roles + sedes + usuarios + 24 operativas)
+-- Vistas: 5 | Índices: 19 | Políticas RLS: 41 | Triggers: 7
+--
+-- ORDEN DE EJECUCIÓN:
+--   1. calead_purge_bd.sql         ← limpia BD actual
+--   2. calead_abastecimiento_v3_supabase.sql  ← este archivo
+--   3. calead_seed_superusuario_v3.sql        ← crea el superusuario
+-- =============================================================================

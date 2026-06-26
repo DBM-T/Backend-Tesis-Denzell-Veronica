@@ -27,6 +27,17 @@ class UserCreate(BaseModel):
     activo: bool = True
 
 
+class UserUpdate(BaseModel):
+    email: EmailStr | None = None
+    password: str | None = Field(default=None, min_length=6, max_length=128)
+    nombre_completo: str | None = Field(default=None, min_length=1, max_length=200)
+    rol: str | None = None
+    sede_id: UUID | None = None
+    activo: bool | None = None
+    telefono: str | None = None
+    avatar_url: str | None = None
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
