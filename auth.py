@@ -1,11 +1,12 @@
-"""
-auth.py — Dependencia de autenticación para FastAPI.
-Verifica el JWT de Supabase y retorna el usuario con su rol.
-"""
+"""Dependencias de autenticacion y autorizacion para FastAPI."""
+from functools import lru_cache
+
+import requests
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import jwt, JWTError
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwk, jwt
 from pydantic import BaseModel
+
 from config import get_settings
 from database import supabase_admin
 
@@ -14,11 +15,12 @@ _s = get_settings()
 
 
 class CurrentUser(BaseModel):
-    id:       str
-    email:    str
-    role:     str   # nombre del rol: 'almacen'|'tecnico'|'asesor'|...
-    role_id:  str
+    id: str
+    email: str
+    role: str
+    role_id: str | None = None
     branch_id: str | None = None
+    sede_id: str | None = None
     permissions: dict = {}
 
 
@@ -27,45 +29,41 @@ async def get_current_user(
 ) -> CurrentUser:
     token = creds.credentials
     try:
-        payload = jwt.decode(
-            token,
-            _s.supabase_jwt_secret,
-            algorithms=["HS256"],
-            audience="authenticated",
-        )
-        user_id: str = payload.get("sub")
+        payload = _decode_supabase_jwt(token)
+        user_id: str | None = payload.get("sub")
         if not user_id:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token invalido")
     except JWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido o expirado")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token invalido o expirado")
 
-    # Obtener datos del usuario + rol (una sola consulta con join)
-    sb = supabase_admin()
     result = (
-        sb.table("users")
-        .select("id, email, branch_id, role_id, roles(name, permissions)")
+        supabase_admin()
+        .table("profiles")
+        .select("id, rol, sede_id, activo, is_superuser")
         .eq("id", user_id)
-        .eq("active", True)
+        .eq("activo", True)
         .single()
         .execute()
     )
     if not result.data:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Usuario no encontrado o inactivo")
 
-    u = result.data
-    role_data = u.get("roles") or {}
+    profile = result.data
+    role = "superadmin" if profile.get("is_superuser") else profile.get("rol", "")
+    sede_id = profile.get("sede_id")
     return CurrentUser(
-        id=u["id"],
-        email=u["email"],
-        role=role_data.get("name", ""),
-        role_id=u["role_id"],
-        branch_id=u.get("branch_id"),
-        permissions=role_data.get("permissions", {}),
+        id=profile["id"],
+        email=payload.get("email", ""),
+        role=role,
+        branch_id=sede_id,
+        sede_id=sede_id,
+        permissions={},
     )
 
 
 def require_roles(*roles: str):
-    """Dependencia de autorización por rol. Uso: Depends(require_roles('admin','almacen'))"""
+    """Dependencia de autorizacion por rol."""
+
     async def _check(user: CurrentUser = Depends(get_current_user)):
         if user.role not in roles:
             raise HTTPException(
@@ -73,4 +71,42 @@ def require_roles(*roles: str):
                 f"Rol '{user.role}' no tiene permiso. Requerido: {list(roles)}",
             )
         return user
+
     return _check
+
+
+@lru_cache(maxsize=1)
+def _load_jwks() -> dict:
+    if not _s.supabase_jwks_url:
+        return {}
+    response = requests.get(_s.supabase_jwks_url, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def _decode_supabase_jwt(token: str) -> dict:
+    if _s.supabase_jwks_url:
+        header = jwt.get_unverified_header(token)
+        key_id = header.get("kid")
+        jwks = _load_jwks()
+        keys = jwks.get("keys", [])
+        jwk_data = next((key for key in keys if key.get("kid") == key_id), None)
+        if not jwk_data:
+            raise JWTError("JWKS key not found")
+        public_key = jwk.construct(jwk_data, algorithm=header.get("alg", "RS256"))
+        return jwt.decode(
+            token,
+            public_key.to_pem().decode("utf-8"),
+            algorithms=[header.get("alg", "RS256")],
+            audience="authenticated",
+        )
+
+    if _s.supabase_jwt_secret:
+        return jwt.decode(
+            token,
+            _s.supabase_jwt_secret,
+            algorithms=["HS256"],
+            audience="authenticated",
+        )
+
+    raise JWTError("No JWT verification material configured")

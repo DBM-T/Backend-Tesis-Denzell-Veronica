@@ -1,41 +1,52 @@
-"""schemas/part.py — Repuestos"""
-from pydantic import BaseModel, ConfigDict
-from uuid import UUID
+"""Schemas para productos/repuestos."""
 from datetime import datetime
+from decimal import Decimal
+from typing import Any
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict
 
 
 class PartCreate(BaseModel):
-    name:                 str
-    description:          str
-    brand:                str | None  = None
-    part_number:          str | None  = None
-    internal_code:        str | None  = None
-    vehicle_compatibility: str | None = None
-    category:             str | None  = None
-    unit_of_measure:      str         = "und"
+    sku_padre: str
+    nombre: str
+    descripcion: str | None = None
+    categoria_id: UUID | None = None
+    marca: str | None = None
+    codigo_fabricante: str | None = None
+    unidad_medida: str = "UND"
+    vehiculos_compatibles: list[dict[str, Any]] | None = None
+    precio_referencia: Decimal | None = None
 
 
 class PartUpdate(BaseModel):
-    name:                 str | None  = None
-    description:          str | None  = None
-    brand:                str | None  = None
-    part_number:          str | None  = None
-    vehicle_compatibility: str | None = None
-    category:             str | None  = None
-    active:               bool | None = None
+    sku_padre: str | None = None
+    nombre: str | None = None
+    descripcion: str | None = None
+    categoria_id: UUID | None = None
+    marca: str | None = None
+    codigo_fabricante: str | None = None
+    unidad_medida: str | None = None
+    vehiculos_compatibles: list[dict[str, Any]] | None = None
+    is_active: bool | None = None
+    precio_referencia: Decimal | None = None
 
 
 class PartOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    id:                   UUID
-    internal_code:        str | None
-    name:                 str
-    description:          str
-    brand:                str | None
-    part_number:          str | None
-    vehicle_compatibility: str | None
-    category:             str | None
-    unit_of_measure:      str
-    canonical_part_id:    UUID | None
-    active:               bool
-    created_at:           datetime
+
+    id: UUID
+    sku_padre: str
+    nombre: str
+    descripcion: str | None = None
+    categoria_id: UUID | None = None
+    categoria: str | None = None
+    marca: str | None = None
+    codigo_fabricante: str | None = None
+    unidad_medida: str
+    vehiculos_compatibles: list[dict[str, Any]] | None = None
+    is_storable: bool
+    is_active: bool
+    precio_referencia: Decimal | None = None
+    total_stock: Decimal | None = None
+    created_at: datetime

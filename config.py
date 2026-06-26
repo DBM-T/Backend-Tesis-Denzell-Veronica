@@ -1,35 +1,55 @@
-"""
-config.py — Variables de entorno y configuración central
-"""
-from pydantic_settings import BaseSettings, SettingsConfigDict
+"""Variables de entorno y configuracion central."""
 from functools import lru_cache
+
+from pydantic import Field, AliasChoices
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     # Supabase
-    supabase_url:         str
-    supabase_anon_key:    str
-    supabase_service_key: str
-    supabase_jwt_secret:  str
+    supabase_url: str = Field(validation_alias=AliasChoices("SUPABASE_URL"))
+    supabase_publishable_key: str = Field(
+        validation_alias=AliasChoices("SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY")
+    )
+    supabase_secret_key: str = Field(
+        validation_alias=AliasChoices("SUPABASE_SECRET_KEY", "SUPABASE_SERVICE_KEY")
+    )
+    supabase_jwks_url: str | None = Field(
+        default=None, validation_alias=AliasChoices("SUPABASE_JWKS_URL")
+    )
+    supabase_jwt_secret: str | None = Field(
+        default=None, validation_alias=AliasChoices("SUPABASE_JWT_SECRET")
+    )
 
     # PostgreSQL directo (asyncpg)
     database_url: str
 
-    # RNS
-    rns_model_path:           str   = "./rns_module/weights/sasnn_v1.pt"
-    rns_encoder_name:         str   = "paraphrase-multilingual-MiniLM-L12-v2"
-    rns_similarity_threshold: float = 0.85
-    rns_top_k:                int   = 5
+    # Machine Learning
+    ml_models_dir: str = "./ml_models"
+    xgboost_model_path: str = "./ml_models/xgboost_demanda.joblib"
+    lightgbm_model_path: str = "./ml_models/lightgbm_prioridad.joblib"
 
     # App
-    app_env:          str = "development"
+    app_env: str = "development"
     app_cors_origins: str = "http://localhost:3000"
 
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.app_cors_origins.split(",")]
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    @property
+    def supabase_anon_key(self) -> str:
+        return self.supabase_publishable_key
+
+    @property
+    def supabase_service_key(self) -> str:
+        return self.supabase_secret_key
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
 @lru_cache

@@ -1,36 +1,54 @@
-"""schemas/supply_request.py — Solicitudes de abastecimiento"""
-from pydantic import BaseModel, ConfigDict
-from uuid import UUID
+"""Schemas para requisiciones de compra."""
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict
+
+
+class SupplyRequestLineCreate(BaseModel):
+    producto_id: UUID
+    qty_solicitada: Decimal
+    precio_estimado: Decimal | None = None
+    proveedor_sugerido_id: UUID | None = None
+    observaciones: str | None = None
 
 
 class SupplyRequestCreate(BaseModel):
-    work_order_id:   UUID
-    part_description: str
-    quantity:        float = 1.0
-    priority:        Literal["low","normal","high","urgent"] = "normal"
-    notes:           str | None = None
+    sede_id: UUID
+    ot_id: UUID | None = None
+    origen: str = "manual"
+    prioridad: Literal["alta", "baja"] = "baja"
+    observaciones: str | None = None
+    lineas: list[SupplyRequestLineCreate] = []
 
 
 class SupplyRequestStatusUpdate(BaseModel):
-    status: Literal[
-        "requested","quotations_work","parts_pending","ready_for_advisor","cancelled"
+    estado: Literal[
+        "borrador",
+        "pendiente_aprobacion",
+        "aprobada",
+        "rechazada",
+        "cancelada",
+        "procesada",
     ]
-    notes: str | None = None
+    observaciones: str | None = None
 
 
 class SupplyRequestOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    id:                         UUID
-    work_order_id:              UUID
-    part_description:           str
-    quantity:                   float
-    status:                     str
-    priority:                   str
-    parts_pending_since:        datetime | None
-    resolved_by_equivalence:    bool
-    resolved_equivalent_part_id: UUID | None
-    purchase_order_id:          UUID | None
-    notes:                      str | None
-    created_at:                 datetime
+
+    id: UUID
+    pr_codigo: str
+    sede_id: UUID
+    ot_id: UUID | None = None
+    origen: str
+    estado: str
+    prioridad: str
+    observaciones: str | None = None
+    solicitado_por: UUID
+    aprobado_por: UUID | None = None
+    aprobado_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime

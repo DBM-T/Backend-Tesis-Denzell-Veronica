@@ -1,29 +1,38 @@
-"""routers/purchase_orders.py — Proceso de compra"""
-from fastapi import APIRouter, Depends, HTTPException, Query
+"""Proceso de compra."""
+from decimal import Decimal
 from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from auth import get_current_user, require_roles, CurrentUser
+
+from auth import CurrentUser, get_current_user, require_roles
 from database import get_conn
 
 router = APIRouter()
 
 
+class PurchaseOrderLineCreate(BaseModel):
+    producto_id: UUID
+    qty_pedida: Decimal
+    precio_unitario: Decimal
+
+
 class PurchaseOrderCreate(BaseModel):
-    supply_request_id: UUID
-    supplier_id:       UUID
-    branch_id:         UUID
-    part_description:  str
-    quantity:          float
-    unit_price:        float | None = None
-    currency:          str = "PEN"
-    priority:          str = "normal"
-    notes:             str | None = None
+    requisicion_id: UUID | None = None
+    proveedor_id: UUID
+    sede_id: UUID
+    canal: str = "local"
+    canal_sugerido_ml: str | None = None
+    prioridad: str = "baja"
+    fecha_entrega_estimada: str | None = None
+    observaciones: str | None = None
+    lineas: list[PurchaseOrderLineCreate] = []
 
 
 @router.get("")
 async def list_purchase_orders(
-    status:    str | None = None,
-    branch_id: UUID | None = None,
+    estado: str | None = None,
+    sede_id: UUID | None = None,
     limit: int = Query(50, le=200),
     offset: int = 0,
     _user: CurrentUser = Depends(get_current_user),
@@ -31,21 +40,27 @@ async def list_purchase_orders(
     async with get_conn() as conn:
         filters, params = [], []
         i = 1
-        if status:
-            filters.append(f"po.status = ${i}"); params.append(status); i += 1
-        if branch_id:
-            filters.append(f"po.branch_id = ${i}"); params.append(branch_id); i += 1
+        if estado:
+            filters.append(f"oc.estado = ${i}")
+            params.append(estado)
+            i += 1
+        if sede_id:
+            filters.append(f"oc.sede_id = ${i}")
+            params.append(sede_id)
+            i += 1
         where = "WHERE " + " AND ".join(filters) if filters else ""
         rows = await conn.fetch(
             f"""
-            SELECT po.*, s.name AS supplier_name
-            FROM purchase_orders po
-            JOIN suppliers s ON s.id = po.supplier_id
+            SELECT oc.*, p.razon_social AS proveedor
+            FROM ordenes_compra oc
+            JOIN proveedores p ON p.id = oc.proveedor_id
             {where}
-            ORDER BY po.created_at DESC
-            LIMIT ${i} OFFSET ${i+1}
+            ORDER BY oc.created_at DESC
+            LIMIT ${i} OFFSET ${i + 1}
             """,
-            *params, limit, offset,
+            *params,
+            limit,
+            offset,
         )
     return [dict(r) for r in rows]
 
@@ -53,66 +68,92 @@ async def list_purchase_orders(
 @router.post("", status_code=201)
 async def create_purchase_order(
     body: PurchaseOrderCreate,
-    user: CurrentUser = Depends(require_roles("almacen", "admin")),
+    user: CurrentUser = Depends(require_roles("superadmin", "admin", "logistica")),
 ):
-    total = (body.unit_price or 0) * body.quantity if body.unit_price else None
     async with get_conn() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO purchase_orders
-                (supply_request_id, supplier_id, branch_id, managed_by,
-                 part_description, quantity, unit_price, total_amount,
-                 currency, priority, notes)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-            RETURNING *
-            """,
-            body.supply_request_id, body.supplier_id, body.branch_id, user.id,
-            body.part_description, body.quantity, body.unit_price, total,
-            body.currency, body.priority, body.notes,
-        )
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO ordenes_compra (
+                  requisicion_id, proveedor_id, sede_id, canal, canal_sugerido_ml,
+                  prioridad, fecha_entrega_estimada, observaciones, creado_por
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                RETURNING *
+                """,
+                body.requisicion_id,
+                body.proveedor_id,
+                body.sede_id,
+                body.canal,
+                body.canal_sugerido_ml,
+                body.prioridad,
+                body.fecha_entrega_estimada,
+                body.observaciones,
+                user.id,
+            )
+            for line in body.lineas:
+                await conn.execute(
+                    """
+                    INSERT INTO oc_lineas (oc_id, producto_id, qty_pedida, precio_unitario)
+                    VALUES ($1,$2,$3,$4)
+                    """,
+                    row["id"],
+                    line.producto_id,
+                    line.qty_pedida,
+                    line.precio_unitario,
+                )
     return dict(row)
 
 
-@router.patch("/{po_id}/treasury-approve")
-async def treasury_approve(
+@router.patch("/{po_id}/approve")
+async def approve_order(
     po_id: UUID,
-    payment_proof: str | None = None,
-    user: CurrentUser = Depends(require_roles("admin")),
+    user: CurrentUser = Depends(require_roles("superadmin", "admin", "gerencia", "logistica")),
 ):
     async with get_conn() as conn:
         row = await conn.fetchrow(
             """
-            UPDATE purchase_orders
-            SET treasury_status='approved', treasury_approved_by=$2,
-                treasury_approved_at=NOW(), treasury_payment_proof=$3,
-                status='treasury_approved'
+            UPDATE ordenes_compra
+            SET estado='enviada', aprobado_por=$2, aprobado_at=NOW()
             WHERE id=$1
-            RETURNING id, status, treasury_status
+            RETURNING id, po_codigo, estado
             """,
-            po_id, user.id, payment_proof,
+            po_id,
+            user.id,
         )
     if not row:
         raise HTTPException(404, "Orden de compra no encontrada")
     return dict(row)
 
 
-@router.patch("/{po_id}/receive")
-async def receive_order(
+@router.patch("/{po_id}/status")
+async def update_order_status(
     po_id: UUID,
-    corresponds: bool,
-    user: CurrentUser = Depends(require_roles("almacen", "admin")),
+    estado: str,
+    _user: CurrentUser = Depends(require_roles("superadmin", "admin", "logistica", "almacen", "almacen_senior")),
 ):
-    """Almacén verifica la recepción del repuesto."""
     async with get_conn() as conn:
         row = await conn.fetchrow(
-            """
-            UPDATE purchase_orders
-            SET status=$2, corresponds=$3, verified_by=$4, verified_at=NOW()
-            WHERE id=$1
-            RETURNING id, status
-            """,
-            po_id, "received" if corresponds else "returned", corresponds, user.id,
+            "UPDATE ordenes_compra SET estado=$2 WHERE id=$1 RETURNING id, po_codigo, estado",
+            po_id,
+            estado,
         )
     if not row:
         raise HTTPException(404, "OC no encontrada")
     return dict(row)
+
+
+@router.get("/{po_id}/lines")
+async def get_order_lines(po_id: UUID, _user: CurrentUser = Depends(get_current_user)):
+    async with get_conn() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT ol.*, p.sku_padre, p.nombre AS producto
+            FROM oc_lineas ol
+            JOIN productos p ON p.id = ol.producto_id
+            WHERE ol.oc_id = $1
+            ORDER BY ol.created_at
+            """,
+            po_id,
+        )
+    return [dict(r) for r in rows]
