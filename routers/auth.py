@@ -1,11 +1,13 @@
 """Login, token refresh y perfil."""
 from fastapi import APIRouter, Depends, HTTPException, status
+from loguru import logger
 from pydantic import BaseModel
 from supabase import create_client
+from supabase_auth.errors import AuthApiError
 
 from auth import CurrentUser, get_current_user
 from config import get_settings
-from database import supabase_admin
+from services.user_store import get_user_context, sync_usuario_from_auth
 
 router = APIRouter()
 _s = get_settings()
@@ -24,30 +26,57 @@ class TokenResponse(BaseModel):
     permissions: dict
 
 
+def _get_value(obj, key: str, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest):
-    sb = create_client(_s.supabase_url, _s.supabase_publishable_key)
     try:
+        sb = create_client(_s.supabase_url, _s.supabase_publishable_key)
         res = sb.auth.sign_in_with_password({"email": body.email, "password": body.password})
-    except Exception:
+    except AuthApiError as exc:
+        detail = str(exc)
+        logger.error(f"Error de Auth al iniciar sesion para {body.email}: {detail}")
+        if "Database error" in detail:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "Supabase Auth reporto un error interno al validar este usuario",
+            )
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciales invalidas")
+    except Exception as exc:
+        logger.error(f"Error inesperado en login para {body.email}: {exc}")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciales invalidas")
 
-    profile = (
-        supabase_admin()
-        .table("profiles")
-        .select("rol, is_superuser")
-        .eq("id", res.user.id)
-        .single()
-        .execute()
-    )
-    data = profile.data or {}
-    user_role = "superadmin" if data.get("is_superuser") else data.get("rol", "")
+    user_id = _get_value(res.user, "id")
+    user_metadata = _get_value(res.user, "user_metadata", None) or {}
+    app_metadata = _get_value(res.user, "app_metadata", None) or {}
+    data = get_user_context(user_id, require_active=False)
+
+    fallback_role = user_metadata.get("rol") or app_metadata.get("role") or "tecnico"
+    if not data:
+        try:
+            data = sync_usuario_from_auth(
+                user_id=user_id,
+                email=_get_value(res.user, "email", body.email),
+                nombre_completo=user_metadata.get("nombre_completo", body.email),
+                role_name=fallback_role,
+                sede_id=user_metadata.get("sede_id"),
+                activo=True,
+            )
+        except Exception as exc:
+            logger.warning(f"No se pudo crear/actualizar usuarios para {body.email}: {exc}")
+            data = {}
+
+    user_role = data.get("rol", "") or fallback_role
 
     return TokenResponse(
-        access_token=res.session.access_token,
-        refresh_token=res.session.refresh_token,
+        access_token=_get_value(res.session, "access_token"),
+        refresh_token=_get_value(res.session, "refresh_token"),
         user_role=user_role,
-        permissions={},
+        permissions=data.get("permisos") or {},
     )
 
 

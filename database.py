@@ -41,7 +41,9 @@ async def init_db_pool():
         logger.info("BD inicializada con pool asyncpg")
     except Exception as exc:
         _pool = None
-        logger.warning(f"No se pudo inicializar asyncpg; la API inicia sin pool SQL: {exc}")
+        logger.warning(
+            f"No se pudo inicializar asyncpg; la API continuara con Supabase REST: {exc}"
+        )
 
 
 async def close_db_pool():

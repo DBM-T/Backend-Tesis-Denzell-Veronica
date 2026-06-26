@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from auth import CurrentUser, get_current_user, require_roles
-from database import get_conn
+from database import supabase_admin
 
 router = APIRouter()
 
@@ -30,41 +30,27 @@ async def list_work_orders(
     offset: int = 0,
     _user: CurrentUser = Depends(get_current_user),
 ):
-    async with get_conn() as conn:
-        filters, params = [], []
-        i = 1
-        if status:
-            filters.append(f"estado = ${i}")
-            params.append(status)
-            i += 1
-        if sede_id:
-            filters.append(f"sede_id = ${i}")
-            params.append(sede_id)
-            i += 1
-        where = "WHERE " + " AND ".join(filters) if filters else ""
-        rows = await conn.fetch(
-            f"SELECT * FROM ordenes_trabajo {where} ORDER BY created_at DESC LIMIT ${i} OFFSET ${i + 1}",
-            *params,
-            limit,
-            offset,
-        )
-    return [dict(r) for r in rows]
+    query = supabase_admin().table("ordenes_trabajo").select("*")
+    if status:
+        query = query.eq("estado", status)
+    if sede_id:
+        query = query.eq("sede_id", str(sede_id))
+    result = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
+    return result.data or []
 
 
 @router.get("/trace")
 async def ot_trace(_user: CurrentUser = Depends(get_current_user)):
-    async with get_conn() as conn:
-        rows = await conn.fetch("SELECT * FROM v_trazabilidad ORDER BY ot_creada DESC LIMIT 100")
-    return [dict(r) for r in rows]
+    result = supabase_admin().table("v_trazabilidad").select("*").order("ot_creada", desc=True).range(0, 99).execute()
+    return result.data or []
 
 
 @router.get("/{ot_id}")
 async def get_work_order(ot_id: UUID, _user: CurrentUser = Depends(get_current_user)):
-    async with get_conn() as conn:
-        row = await conn.fetchrow("SELECT * FROM ordenes_trabajo WHERE id = $1", ot_id)
-    if not row:
+    result = supabase_admin().table("ordenes_trabajo").select("*").eq("id", str(ot_id)).limit(1).execute()
+    if not result.data:
         raise HTTPException(404, "Orden de trabajo no encontrada")
-    return dict(row)
+    return result.data[0]
 
 
 @router.post("", status_code=201)
@@ -72,27 +58,27 @@ async def create_work_order(
     body: WorkOrderCreate,
     user: CurrentUser = Depends(require_roles("superadmin", "admin", "asesor", "gerencia")),
 ):
-    async with get_conn() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO ordenes_trabajo (
-              cita_id, sede_id, vehiculo_id, tecnico_id, prioridad, diagnostico_inicial,
-              km_ingreso, tiempo_estimado_horas, created_by
-            )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            RETURNING *
-            """,
-            body.cita_id,
-            body.sede_id,
-            body.vehiculo_id,
-            body.tecnico_id,
-            body.prioridad,
-            body.diagnostico_inicial,
-            body.km_ingreso,
-            body.tiempo_estimado_horas,
-            user.id,
+    result = (
+        supabase_admin()
+        .table("ordenes_trabajo")
+        .insert(
+            {
+                "cita_id": str(body.cita_id) if body.cita_id else None,
+                "sede_id": str(body.sede_id),
+                "vehiculo_id": str(body.vehiculo_id),
+                "tecnico_id": str(body.tecnico_id) if body.tecnico_id else None,
+                "prioridad": body.prioridad,
+                "diagnostico_inicial": body.diagnostico_inicial,
+                "km_ingreso": body.km_ingreso,
+                "tiempo_estimado_horas": body.tiempo_estimado_horas,
+                "created_by": user.id,
+            }
         )
-    return dict(row)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(500, "No se pudo crear la orden de trabajo")
+    return result.data[0]
 
 
 @router.patch("/{ot_id}/status")
@@ -101,12 +87,14 @@ async def update_ot_status(
     estado: str,
     _user: CurrentUser = Depends(require_roles("superadmin", "admin", "asesor", "almacen", "almacen_senior", "logistica")),
 ):
-    async with get_conn() as conn:
-        row = await conn.fetchrow(
-            "UPDATE ordenes_trabajo SET estado=$2 WHERE id=$1 RETURNING id, estado",
-            ot_id,
-            estado,
-        )
-    if not row:
+    result = (
+        supabase_admin()
+        .table("ordenes_trabajo")
+        .update({"estado": estado})
+        .eq("id", str(ot_id))
+        .execute()
+    )
+    if not result.data:
         raise HTTPException(404, "OT no encontrada")
-    return dict(row)
+    row = result.data[0]
+    return {"id": row["id"], "estado": row["estado"]}

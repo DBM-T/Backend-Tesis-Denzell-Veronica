@@ -1,11 +1,12 @@
 """Endpoints ML para XGBoost y LightGBM."""
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from auth import CurrentUser, get_current_user, require_roles
-from database import get_conn
+from database import supabase_admin
 from schemas.ml import (
     DemandForecastCreate,
     DemandForecastOut,
@@ -27,27 +28,15 @@ async def list_models(
     activo: bool | None = None,
     _user: CurrentUser = Depends(get_current_user),
 ):
-    async with get_conn() as conn:
-        filters, params = [], []
-        i = 1
-        if tipo:
-            filters.append(f"tipo = ${i}")
-            params.append(tipo)
-            i += 1
-        if proposito:
-            filters.append(f"proposito = ${i}")
-            params.append(proposito)
-            i += 1
-        if activo is not None:
-            filters.append(f"activo = ${i}")
-            params.append(activo)
-            i += 1
-        where = "WHERE " + " AND ".join(filters) if filters else ""
-        rows = await conn.fetch(
-            f"SELECT * FROM ml_modelos {where} ORDER BY fecha_entrenamiento DESC",
-            *params,
-        )
-    return [dict(r) for r in rows]
+    query = supabase_admin().table("ml_modelos").select("*")
+    if tipo:
+        query = query.eq("tipo", tipo)
+    if proposito:
+        query = query.eq("proposito", proposito)
+    if activo is not None:
+        query = query.eq("activo", activo)
+    result = query.order("fecha_entrenamiento", desc=True).execute()
+    return result.data or []
 
 
 @router.post("/models", response_model=MLModelOut, status_code=201)
@@ -55,30 +44,29 @@ async def create_model(
     body: MLModelCreate,
     _user: CurrentUser = Depends(require_roles("superadmin", "admin")),
 ):
-    async with get_conn() as conn:
-        async with conn.transaction():
-            if body.activo:
-                await conn.execute(
-                    "UPDATE ml_modelos SET activo=FALSE WHERE tipo=$1 AND proposito=$2",
-                    body.tipo,
-                    body.proposito,
-                )
-            row = await conn.fetchrow(
-                """
-                INSERT INTO ml_modelos
-                  (nombre, tipo, proposito, version, metricas, hiperparametros, activo)
-                VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7)
-                RETURNING *
-                """,
-                body.nombre,
-                body.tipo,
-                body.proposito,
-                body.version,
-                body.metricas,
-                body.hiperparametros,
-                body.activo,
-            )
-    return dict(row)
+    admin = supabase_admin()
+    if body.activo:
+        admin.table("ml_modelos").update({"activo": False}).eq("tipo", body.tipo).eq(
+            "proposito", body.proposito
+        ).execute()
+    result = (
+        admin.table("ml_modelos")
+        .insert(
+            {
+                "nombre": body.nombre,
+                "tipo": body.tipo,
+                "proposito": body.proposito,
+                "version": body.version,
+                "metricas": body.metricas,
+                "hiperparametros": body.hiperparametros,
+                "activo": body.activo,
+            }
+        )
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(500, "No se pudo crear el modelo")
+    return result.data[0]
 
 
 @router.patch("/models/{model_id}/activate", response_model=MLModelOut)
@@ -86,18 +74,16 @@ async def activate_model(
     model_id: UUID,
     _user: CurrentUser = Depends(require_roles("superadmin", "admin")),
 ):
-    async with get_conn() as conn:
-        async with conn.transaction():
-            model = await conn.fetchrow("SELECT * FROM ml_modelos WHERE id=$1", model_id)
-            if not model:
-                raise HTTPException(404, "Modelo no encontrado")
-            await conn.execute(
-                "UPDATE ml_modelos SET activo=FALSE WHERE tipo=$1 AND proposito=$2",
-                model["tipo"],
-                model["proposito"],
-            )
-            row = await conn.fetchrow("UPDATE ml_modelos SET activo=TRUE WHERE id=$1 RETURNING *", model_id)
-    return dict(row)
+    admin = supabase_admin()
+    current = admin.table("ml_modelos").select("*").eq("id", str(model_id)).limit(1).execute()
+    if not current.data:
+        raise HTTPException(404, "Modelo no encontrado")
+    model = current.data[0]
+    admin.table("ml_modelos").update({"activo": False}).eq("tipo", model["tipo"]).eq(
+        "proposito", model["proposito"]
+    ).execute()
+    result = admin.table("ml_modelos").update({"activo": True}).eq("id", str(model_id)).execute()
+    return result.data[0]
 
 
 @router.post("/priority/predict", response_model=PriorityPredictionResponse)
@@ -105,40 +91,46 @@ async def predict_priority(
     body: PriorityPredictionRequest,
     _user: CurrentUser = Depends(require_roles("superadmin", "admin", "gerencia", "asesor", "logistica")),
 ):
-    async with get_conn() as conn:
-        model = await conn.fetchrow(
-            """
-            SELECT version FROM ml_modelos
-            WHERE tipo='lightgbm' AND proposito='prioridad' AND activo=TRUE
-            ORDER BY fecha_entrenamiento DESC
-            LIMIT 1
-            """
-        )
-        ot = await conn.fetchrow("SELECT * FROM ordenes_trabajo WHERE id=$1", body.ot_id)
-        if not ot:
-            raise HTTPException(404, "OT no encontrada")
+    admin = supabase_admin()
+    model_res = (
+        admin.table("ml_modelos")
+        .select("version")
+        .eq("tipo", "lightgbm")
+        .eq("proposito", "prioridad")
+        .eq("activo", True)
+        .order("fecha_entrenamiento", desc=True)
+        .limit(1)
+        .execute()
+    )
+    ot_res = admin.table("ordenes_trabajo").select("*").eq("id", str(body.ot_id)).limit(1).execute()
+    if not ot_res.data:
+        raise HTTPException(404, "OT no encontrada")
 
-        texto = (body.diagnostico_inicial or ot["diagnostico_inicial"] or "").lower()
-        horas = body.tiempo_estimado_horas or ot["tiempo_estimado_horas"] or Decimal("0")
-        km = body.km_ingreso or ot["km_ingreso"] or 0
-        alta = any(word in texto for word in ["urgente", "inmovilizado", "freno", "motor"])
-        alta = alta or horas >= Decimal("6") or km >= 180000
-        prioridad = "alta" if alta else "baja"
-        confianza = Decimal("0.780") if alta else Decimal("0.720")
-        version = model["version"] if model else "lightgbm-rule-fallback"
+    ot = ot_res.data[0]
+    texto = (body.diagnostico_inicial or ot.get("diagnostico_inicial") or "").lower()
+    horas = body.tiempo_estimado_horas or Decimal(str(ot.get("tiempo_estimado_horas") or "0"))
+    km = body.km_ingreso or ot.get("km_ingreso") or 0
+    alta = any(word in texto for word in ["urgente", "inmovilizado", "freno", "motor"])
+    alta = alta or horas >= Decimal("6") or km >= 180000
+    prioridad = "alta" if alta else "baja"
+    confianza = Decimal("0.780") if alta else Decimal("0.720")
+    version = (
+        model_res.data[0]["version"] if model_res.data else "lightgbm-rule-fallback"
+    )
 
-        row = await conn.fetchrow(
-            """
-            UPDATE ordenes_trabajo
-            SET prioridad_ml=$2, prioridad_confianza=$3, prioridad_ml_version=$4
-            WHERE id=$1
-            RETURNING id, prioridad_ml, prioridad_confianza, prioridad_ml_version
-            """,
-            body.ot_id,
-            prioridad,
-            confianza,
-            version,
+    result = (
+        admin.table("ordenes_trabajo")
+        .update(
+            {
+                "prioridad_ml": prioridad,
+                "prioridad_confianza": confianza,
+                "prioridad_ml_version": version,
+            }
         )
+        .eq("id", str(body.ot_id))
+        .execute()
+    )
+    row = result.data[0]
     return {
         "ot_id": row["id"],
         "prioridad_ml": row["prioridad_ml"],
@@ -154,24 +146,13 @@ async def list_demand_forecasts(
     limit: int = Query(100, le=500),
     _user: CurrentUser = Depends(get_current_user),
 ):
-    async with get_conn() as conn:
-        filters, params = [], []
-        i = 1
-        if producto_id:
-            filters.append(f"producto_id = ${i}")
-            params.append(producto_id)
-            i += 1
-        if sede_id:
-            filters.append(f"sede_id = ${i}")
-            params.append(sede_id)
-            i += 1
-        where = "WHERE " + " AND ".join(filters) if filters else ""
-        rows = await conn.fetch(
-            f"SELECT * FROM ml_predicciones_demanda {where} ORDER BY created_at DESC LIMIT ${i}",
-            *params,
-            limit,
-        )
-    return [dict(r) for r in rows]
+    query = supabase_admin().table("ml_predicciones_demanda").select("*")
+    if producto_id:
+        query = query.eq("producto_id", str(producto_id))
+    if sede_id:
+        query = query.eq("sede_id", str(sede_id))
+    result = query.order("created_at", desc=True).range(0, limit - 1).execute()
+    return result.data or []
 
 
 @router.post("/demand/forecasts", response_model=DemandForecastOut, status_code=201)
@@ -179,30 +160,29 @@ async def create_demand_forecast(
     body: DemandForecastCreate,
     _user: CurrentUser = Depends(require_roles("superadmin", "admin", "logistica")),
 ):
-    async with get_conn() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO ml_predicciones_demanda (
-              producto_id, sede_id, modelo_id, periodo_inicio, periodo_fin, horizonte_dias,
-              qty_predicha, intervalo_inf, intervalo_sup, rop_calculado,
-              stock_seguridad_sugerido
-            )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-            RETURNING *
-            """,
-            body.producto_id,
-            body.sede_id,
-            body.modelo_id,
-            body.periodo_inicio,
-            body.periodo_fin,
-            body.horizonte_dias,
-            body.qty_predicha,
-            body.intervalo_inf,
-            body.intervalo_sup,
-            body.rop_calculado,
-            body.stock_seguridad_sugerido,
+    result = (
+        supabase_admin()
+        .table("ml_predicciones_demanda")
+        .insert(
+            {
+                "producto_id": str(body.producto_id),
+                "sede_id": str(body.sede_id),
+                "modelo_id": str(body.modelo_id) if body.modelo_id else None,
+                "periodo_inicio": body.periodo_inicio.isoformat(),
+                "periodo_fin": body.periodo_fin.isoformat(),
+                "horizonte_dias": body.horizonte_dias,
+                "qty_predicha": body.qty_predicha,
+                "intervalo_inf": body.intervalo_inf,
+                "intervalo_sup": body.intervalo_sup,
+                "rop_calculado": body.rop_calculado,
+                "stock_seguridad_sugerido": body.stock_seguridad_sugerido,
+            }
         )
-    return dict(row)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(500, "No se pudo crear la prediccion")
+    return result.data[0]
 
 
 @router.patch("/demand/forecasts/{forecast_id}/approve")
@@ -210,38 +190,43 @@ async def approve_demand_forecast(
     forecast_id: UUID,
     _user: CurrentUser = Depends(require_roles("superadmin", "admin", "gerencia")),
 ):
-    async with get_conn() as conn:
-        async with conn.transaction():
-            forecast = await conn.fetchrow(
-                """
-                UPDATE ml_predicciones_demanda
-                SET aprobado_por_gerencia=TRUE, aprobado_at=NOW()
-                WHERE id=$1
-                RETURNING *
-                """,
-                forecast_id,
-            )
-            if not forecast:
-                raise HTTPException(404, "Prediccion no encontrada")
-            await conn.execute(
-                """
-                INSERT INTO stock (producto_id, sede_id, rop, stock_seguridad, params_ml, modelo_version)
-                VALUES ($1,$2,$3,COALESCE($4,0),TRUE,$5)
-                ON CONFLICT (producto_id, sede_id)
-                DO UPDATE SET
-                  rop=EXCLUDED.rop,
-                  stock_seguridad=EXCLUDED.stock_seguridad,
-                  params_ml=TRUE,
-                  modelo_version=EXCLUDED.modelo_version,
-                  updated_at=NOW()
-                """,
-                forecast["producto_id"],
-                forecast["sede_id"],
-                forecast["rop_calculado"],
-                forecast["stock_seguridad_sugerido"],
-                "xgboost-demanda",
-            )
-    return dict(forecast)
+    admin = supabase_admin()
+    result = (
+        admin.table("ml_predicciones_demanda")
+        .update(
+            {
+                "aprobado_por_gerencia": True,
+                "aprobado_at": datetime.utcnow().isoformat(),
+            }
+        )
+        .eq("id", str(forecast_id))
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(404, "Prediccion no encontrada")
+    forecast = result.data[0]
+
+    stock_payload = {
+        "producto_id": forecast["producto_id"],
+        "sede_id": forecast["sede_id"],
+        "rop": forecast.get("rop_calculado"),
+        "stock_seguridad": forecast.get("stock_seguridad_sugerido") or 0,
+        "params_ml": True,
+        "modelo_version": "xgboost-demanda",
+    }
+    existing = (
+        admin.table("stock")
+        .select("id")
+        .eq("producto_id", forecast["producto_id"])
+        .eq("sede_id", forecast["sede_id"])
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        admin.table("stock").update(stock_payload).eq("id", existing.data[0]["id"]).execute()
+    else:
+        admin.table("stock").insert(stock_payload).execute()
+    return forecast
 
 
 @router.post("/providers/score", response_model=ProviderScoreOut)
@@ -249,65 +234,75 @@ async def score_provider(
     body: ProviderScoreRequest,
     _user: CurrentUser = Depends(require_roles("superadmin", "admin", "logistica")),
 ):
-    async with get_conn() as conn:
-        model = await conn.fetchrow(
-            """
-            SELECT version FROM ml_modelos
-            WHERE tipo='xgboost' AND proposito='score_proveedor' AND activo=TRUE
-            ORDER BY fecha_entrenamiento DESC
-            LIMIT 1
-            """
-        )
-        on_time = body.entregas_a_tiempo_pct or Decimal("0")
-        defects = body.tasa_defectos_pct or Decimal("0")
-        score = max(Decimal("0"), min(Decimal("100"), on_time - defects * Decimal("1.5")))
-        version = model["version"] if model else "xgboost-score-rule-fallback"
+    admin = supabase_admin()
+    model_res = (
+        admin.table("ml_modelos")
+        .select("version")
+        .eq("tipo", "xgboost")
+        .eq("proposito", "score_proveedor")
+        .eq("activo", True)
+        .order("fecha_entrenamiento", desc=True)
+        .limit(1)
+        .execute()
+    )
+    on_time = body.entregas_a_tiempo_pct or Decimal("0")
+    defects = body.tasa_defectos_pct or Decimal("0")
+    score = max(Decimal("0"), min(Decimal("100"), on_time - defects * Decimal("1.5")))
+    version = model_res.data[0]["version"] if model_res.data else "xgboost-score-rule-fallback"
 
-        row = await conn.fetchrow(
-            """
-            INSERT INTO proveedor_metricas (
-              proveedor_id, periodo, entregas_a_tiempo_pct, tasa_defectos_pct,
-              score_total_ml, modelo_version, componentes_ml
-            )
-            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
-            ON CONFLICT (proveedor_id, periodo)
-            DO UPDATE SET
-              entregas_a_tiempo_pct=EXCLUDED.entregas_a_tiempo_pct,
-              tasa_defectos_pct=EXCLUDED.tasa_defectos_pct,
-              score_total_ml=EXCLUDED.score_total_ml,
-              modelo_version=EXCLUDED.modelo_version,
-              componentes_ml=EXCLUDED.componentes_ml,
-              calculado_at=NOW()
-            RETURNING *
-            """,
-            body.proveedor_id,
-            body.periodo,
-            body.entregas_a_tiempo_pct,
-            body.tasa_defectos_pct,
-            score,
-            version,
-            body.componentes_ml,
+    existing = (
+        admin.table("proveedor_metricas")
+        .select("*")
+        .eq("proveedor_id", str(body.proveedor_id))
+        .eq("periodo", body.periodo)
+        .limit(1)
+        .execute()
+    )
+    payload = {
+        "proveedor_id": str(body.proveedor_id),
+        "periodo": body.periodo,
+        "entregas_a_tiempo_pct": body.entregas_a_tiempo_pct,
+        "tasa_defectos_pct": body.tasa_defectos_pct,
+        "score_total_ml": score,
+        "modelo_version": version,
+        "componentes_ml": body.componentes_ml,
+    }
+    if existing.data:
+        row = (
+            admin.table("proveedor_metricas")
+            .update({**payload, "calculado_at": datetime.utcnow().isoformat()})
+            .eq("id", existing.data[0]["id"])
+            .execute()
+            .data[0]
         )
-        await conn.execute(
-            """
-            WITH ranked AS (
-              SELECT id, ROW_NUMBER() OVER (ORDER BY score_total_ml DESC NULLS LAST) AS rn
-              FROM proveedor_metricas
-              WHERE periodo=$1
-            )
-            UPDATE proveedor_metricas pm
-            SET ranking=ranked.rn
-            FROM ranked
-            WHERE ranked.id=pm.id
-            """,
-            body.periodo,
-        )
-        row = await conn.fetchrow("SELECT * FROM proveedor_metricas WHERE id=$1", row["id"])
-    return dict(row)
+    else:
+        row = admin.table("proveedor_metricas").insert(payload).execute().data[0]
+
+    ranking_rows = (
+        admin.table("proveedor_metricas")
+        .select("id, score_total_ml")
+        .eq("periodo", body.periodo)
+        .order("score_total_ml", desc=True)
+        .execute()
+        .data
+        or []
+    )
+    for index, metric in enumerate(ranking_rows, start=1):
+        admin.table("proveedor_metricas").update({"ranking": index}).eq(
+            "id", metric["id"]
+        ).execute()
+
+    fresh = (
+        admin.table("proveedor_metricas")
+        .select("*")
+        .eq("id", row["id"])
+        .limit(1)
+        .execute()
+    )
+    return fresh.data[0]
 
 
 @router.get("/providers/ranking")
 async def provider_ranking(_user: CurrentUser = Depends(get_current_user)):
-    async with get_conn() as conn:
-        rows = await conn.fetch("SELECT * FROM v_ranking_proveedores")
-    return [dict(r) for r in rows]
+    result = supabase_admin().table("v_ranking_proveedores").select("*").execute()
+    return result.data or []

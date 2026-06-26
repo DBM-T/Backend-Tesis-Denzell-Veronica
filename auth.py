@@ -8,7 +8,7 @@ from jose import JWTError, jwk, jwt
 from pydantic import BaseModel
 
 from config import get_settings
-from database import supabase_admin
+from services.user_store import get_user_context
 
 bearer = HTTPBearer()
 _s = get_settings()
@@ -21,6 +21,8 @@ class CurrentUser(BaseModel):
     role_id: str | None = None
     branch_id: str | None = None
     sede_id: str | None = None
+    nombre_completo: str | None = None
+    is_superuser: bool = False
     permissions: dict = {}
 
 
@@ -36,28 +38,26 @@ async def get_current_user(
     except JWTError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token invalido o expirado")
 
-    result = (
-        supabase_admin()
-        .table("profiles")
-        .select("id, rol, sede_id, activo, is_superuser")
-        .eq("id", user_id)
-        .eq("activo", True)
-        .single()
-        .execute()
-    )
-    if not result.data:
+    try:
+        user = get_user_context(user_id, require_active=True)
+    except Exception:
+        user = None
+
+    if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Usuario no encontrado o inactivo")
 
-    profile = result.data
-    role = "superadmin" if profile.get("is_superuser") else profile.get("rol", "")
-    sede_id = profile.get("sede_id")
+    role = user.get("rol", "")
+    sede_id = user.get("sede_id")
     return CurrentUser(
-        id=profile["id"],
-        email=payload.get("email", ""),
+        id=user["id"],
+        email=user.get("email") or payload.get("email", ""),
         role=role,
+        role_id=user.get("role_id"),
         branch_id=sede_id,
         sede_id=sede_id,
-        permissions={},
+        nombre_completo=user.get("nombre_completo"),
+        is_superuser=bool(user.get("is_superuser")),
+        permissions=user.get("permisos") or {},
     )
 
 

@@ -1,4 +1,5 @@
 """Proceso de compra."""
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -6,7 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from auth import CurrentUser, get_current_user, require_roles
-from database import get_conn
+from database import supabase_admin
+from services.postgrest_utils import relation_one
 
 router = APIRouter()
 
@@ -37,32 +39,18 @@ async def list_purchase_orders(
     offset: int = 0,
     _user: CurrentUser = Depends(get_current_user),
 ):
-    async with get_conn() as conn:
-        filters, params = [], []
-        i = 1
-        if estado:
-            filters.append(f"oc.estado = ${i}")
-            params.append(estado)
-            i += 1
-        if sede_id:
-            filters.append(f"oc.sede_id = ${i}")
-            params.append(sede_id)
-            i += 1
-        where = "WHERE " + " AND ".join(filters) if filters else ""
-        rows = await conn.fetch(
-            f"""
-            SELECT oc.*, p.razon_social AS proveedor
-            FROM ordenes_compra oc
-            JOIN proveedores p ON p.id = oc.proveedor_id
-            {where}
-            ORDER BY oc.created_at DESC
-            LIMIT ${i} OFFSET ${i + 1}
-            """,
-            *params,
-            limit,
-            offset,
-        )
-    return [dict(r) for r in rows]
+    query = supabase_admin().table("ordenes_compra").select("*, proveedores(razon_social)")
+    if estado:
+        query = query.eq("estado", estado)
+    if sede_id:
+        query = query.eq("sede_id", str(sede_id))
+    result = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
+    rows = []
+    for row in result.data or []:
+        proveedor = relation_one(row.pop("proveedores", None))
+        row["proveedor"] = proveedor.get("razon_social")
+        rows.append(row)
+    return rows
 
 
 @router.post("", status_code=201)
@@ -70,39 +58,44 @@ async def create_purchase_order(
     body: PurchaseOrderCreate,
     user: CurrentUser = Depends(require_roles("superadmin", "admin", "logistica")),
 ):
-    async with get_conn() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                """
-                INSERT INTO ordenes_compra (
-                  requisicion_id, proveedor_id, sede_id, canal, canal_sugerido_ml,
-                  prioridad, fecha_entrega_estimada, observaciones, creado_por
-                )
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                RETURNING *
-                """,
-                body.requisicion_id,
-                body.proveedor_id,
-                body.sede_id,
-                body.canal,
-                body.canal_sugerido_ml,
-                body.prioridad,
-                body.fecha_entrega_estimada,
-                body.observaciones,
-                user.id,
-            )
-            for line in body.lineas:
-                await conn.execute(
-                    """
-                    INSERT INTO oc_lineas (oc_id, producto_id, qty_pedida, precio_unitario)
-                    VALUES ($1,$2,$3,$4)
-                    """,
-                    row["id"],
-                    line.producto_id,
-                    line.qty_pedida,
-                    line.precio_unitario,
-                )
-    return dict(row)
+    admin = supabase_admin()
+    delivery_date = (
+        date.fromisoformat(body.fecha_entrega_estimada) if body.fecha_entrega_estimada else None
+    )
+    header = (
+        admin.table("ordenes_compra")
+        .insert(
+            {
+                "requisicion_id": str(body.requisicion_id) if body.requisicion_id else None,
+                "proveedor_id": str(body.proveedor_id),
+                "sede_id": str(body.sede_id),
+                "canal": body.canal,
+                "canal_sugerido_ml": body.canal_sugerido_ml,
+                "prioridad": body.prioridad,
+                "fecha_entrega_estimada": delivery_date.isoformat() if delivery_date else None,
+                "observaciones": body.observaciones,
+                "creado_por": user.id,
+            }
+        )
+        .execute()
+    )
+    if not header.data:
+        raise HTTPException(500, "No se pudo crear la orden de compra")
+
+    po = header.data[0]
+    if body.lineas:
+        admin.table("oc_lineas").insert(
+            [
+                {
+                    "oc_id": po["id"],
+                    "producto_id": str(line.producto_id),
+                    "qty_pedida": line.qty_pedida,
+                    "precio_unitario": line.precio_unitario,
+                }
+                for line in body.lineas
+            ]
+        ).execute()
+    return po
 
 
 @router.patch("/{po_id}/approve")
@@ -110,20 +103,23 @@ async def approve_order(
     po_id: UUID,
     user: CurrentUser = Depends(require_roles("superadmin", "admin", "gerencia", "logistica")),
 ):
-    async with get_conn() as conn:
-        row = await conn.fetchrow(
-            """
-            UPDATE ordenes_compra
-            SET estado='enviada', aprobado_por=$2, aprobado_at=NOW()
-            WHERE id=$1
-            RETURNING id, po_codigo, estado
-            """,
-            po_id,
-            user.id,
+    result = (
+        supabase_admin()
+        .table("ordenes_compra")
+        .update(
+            {
+                "estado": "enviada",
+                "aprobado_por": user.id,
+                "aprobado_at": datetime.utcnow().isoformat(),
+            }
         )
-    if not row:
+        .eq("id", str(po_id))
+        .execute()
+    )
+    if not result.data:
         raise HTTPException(404, "Orden de compra no encontrada")
-    return dict(row)
+    row = result.data[0]
+    return {"id": row["id"], "po_codigo": row["po_codigo"], "estado": row["estado"]}
 
 
 @router.patch("/{po_id}/status")
@@ -132,28 +128,33 @@ async def update_order_status(
     estado: str,
     _user: CurrentUser = Depends(require_roles("superadmin", "admin", "logistica", "almacen", "almacen_senior")),
 ):
-    async with get_conn() as conn:
-        row = await conn.fetchrow(
-            "UPDATE ordenes_compra SET estado=$2 WHERE id=$1 RETURNING id, po_codigo, estado",
-            po_id,
-            estado,
-        )
-    if not row:
+    result = (
+        supabase_admin()
+        .table("ordenes_compra")
+        .update({"estado": estado})
+        .eq("id", str(po_id))
+        .execute()
+    )
+    if not result.data:
         raise HTTPException(404, "OC no encontrada")
-    return dict(row)
+    row = result.data[0]
+    return {"id": row["id"], "po_codigo": row["po_codigo"], "estado": row["estado"]}
 
 
 @router.get("/{po_id}/lines")
 async def get_order_lines(po_id: UUID, _user: CurrentUser = Depends(get_current_user)):
-    async with get_conn() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT ol.*, p.sku_padre, p.nombre AS producto
-            FROM oc_lineas ol
-            JOIN productos p ON p.id = ol.producto_id
-            WHERE ol.oc_id = $1
-            ORDER BY ol.created_at
-            """,
-            po_id,
-        )
-    return [dict(r) for r in rows]
+    result = (
+        supabase_admin()
+        .table("oc_lineas")
+        .select("*, productos(sku_padre, nombre)")
+        .eq("oc_id", str(po_id))
+        .order("created_at")
+        .execute()
+    )
+    rows = []
+    for row in result.data or []:
+        producto = relation_one(row.pop("productos", None))
+        row["sku_padre"] = producto.get("sku_padre")
+        row["producto"] = producto.get("nombre")
+        rows.append(row)
+    return rows

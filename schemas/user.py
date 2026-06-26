@@ -31,10 +31,13 @@ class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    email: EmailStr | None = None
     nombre_completo: str
     rol: str
+    role_id: UUID | None = None
     sede_id: UUID | None = None
     activo: bool
+    is_superuser: bool = False
     telefono: str | None = None
     avatar_url: str | None = None
     created_at: datetime
