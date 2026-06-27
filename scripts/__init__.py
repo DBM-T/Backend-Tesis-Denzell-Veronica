@@ -1,1 +1,0 @@
-"""Scripts utilitarios del proyecto."""
