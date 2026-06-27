@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +33,10 @@ NUMERIC_FEATURES = [
     "is_child_sku_num",
 ]
 MODEL_FEATURES = CATEGORICAL_FEATURES + NUMERIC_FEATURES
+_LEAD_TIME_BUNDLE_CACHE: dict[str, Any] | None = None
+_LEAD_TIME_BUNDLE_MTIME: float | None = None
+_LEAD_TIME_DATASET_CACHE: pd.DataFrame | None = None
+_LEAD_TIME_DATASET_KEY: tuple[str, float] | None = None
 
 
 def _normalize_bool(value: Any) -> bool | None:
@@ -126,33 +129,79 @@ def _dataset_path() -> Path:
     return Path(settings.lead_time_dataset_path)
 
 
-@lru_cache(maxsize=1)
+def _raw_dataset_path() -> Path:
+    settings = get_settings()
+    return Path(settings.lead_time_raw_dataset_path)
+
+
 def load_lead_time_bundle() -> dict[str, Any]:
+    global _LEAD_TIME_BUNDLE_CACHE, _LEAD_TIME_BUNDLE_MTIME
     model_path = _model_path()
     if not model_path.exists():
         raise FileNotFoundError(
             f"No se encontro el modelo de lead time en '{model_path.as_posix()}'. "
             "Primero ejecuta el entrenamiento."
         )
+    mtime = model_path.stat().st_mtime
+    if _LEAD_TIME_BUNDLE_CACHE is not None and _LEAD_TIME_BUNDLE_MTIME == mtime:
+        return _LEAD_TIME_BUNDLE_CACHE
+
     bundle = joblib.load(model_path)
     if not isinstance(bundle, dict) or "pipeline" not in bundle:
         raise RuntimeError("El archivo del modelo de lead time no tiene el formato esperado")
+    _LEAD_TIME_BUNDLE_CACHE = bundle
+    _LEAD_TIME_BUNDLE_MTIME = mtime
     return bundle
 
 
-@lru_cache(maxsize=1)
 def load_lead_time_reference_dataset() -> pd.DataFrame:
-    dataset_path = _dataset_path()
-    if not dataset_path.exists():
-        raise FileNotFoundError(
-            f"No se encontro el dataset procesado de lead time en '{dataset_path.as_posix()}'. "
-            "Ejecuta primero la limpieza del dataset."
+    global _LEAD_TIME_DATASET_CACHE, _LEAD_TIME_DATASET_KEY
+    bundle_dataset_path: Path | None = None
+    try:
+        bundle = load_lead_time_bundle()
+        raw_bundle_dataset_path = bundle.get("reference_dataset_output")
+        if raw_bundle_dataset_path:
+            candidate = Path(str(raw_bundle_dataset_path))
+            if candidate.exists():
+                bundle_dataset_path = candidate
+    except Exception:
+        bundle_dataset_path = None
+
+    dataset_path = bundle_dataset_path or _dataset_path()
+    if dataset_path.exists():
+        cache_key = (dataset_path.as_posix(), dataset_path.stat().st_mtime)
+        if _LEAD_TIME_DATASET_CACHE is not None and _LEAD_TIME_DATASET_KEY == cache_key:
+            return _LEAD_TIME_DATASET_CACHE
+        df = pd.read_csv(
+            dataset_path,
+            parse_dates=["date_order", "date_approve", "date_planned", "effective_date"],
         )
-    df = pd.read_csv(
-        dataset_path,
-        parse_dates=["date_order", "date_approve", "date_planned", "effective_date"],
-    )
+        _LEAD_TIME_DATASET_CACHE = df
+        _LEAD_TIME_DATASET_KEY = cache_key
+        return df
+
+    raw_dataset_path = _raw_dataset_path()
+    if not raw_dataset_path.exists():
+        raise FileNotFoundError(
+            f"No se encontro el dataset de lead time ni en '{dataset_path.as_posix()}' "
+            f"ni en '{raw_dataset_path.as_posix()}'."
+        )
+
+    from services.lead_time_training_service import build_supabase_related_lead_time_dataset
+
+    df, _ = build_supabase_related_lead_time_dataset(raw_dataset_path)
+    _LEAD_TIME_DATASET_CACHE = df
+    _LEAD_TIME_DATASET_KEY = (raw_dataset_path.as_posix(), raw_dataset_path.stat().st_mtime)
     return df
+
+
+def clear_lead_time_caches() -> None:
+    global _LEAD_TIME_BUNDLE_CACHE, _LEAD_TIME_BUNDLE_MTIME
+    global _LEAD_TIME_DATASET_CACHE, _LEAD_TIME_DATASET_KEY
+    _LEAD_TIME_BUNDLE_CACHE = None
+    _LEAD_TIME_BUNDLE_MTIME = None
+    _LEAD_TIME_DATASET_CACHE = None
+    _LEAD_TIME_DATASET_KEY = None
 
 
 def _safe_float(value: Any) -> float | None:

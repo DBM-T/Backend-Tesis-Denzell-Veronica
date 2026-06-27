@@ -1,12 +1,13 @@
 {
-  "mae": 0.6065180180483012,
-  "rmse": 1.3271502249960825,
-  "r2": 0.6715522730065879,
-  "model_version": "lead-time-xgb-20260626-103652",
+  "mae": 0.319294252913096,
+  "rmse": 0.6021959626240273,
+  "r2": 0.9374863747213737,
+  "model_version": "lead-time-xgb-20260627-050646",
   "target": "lead_time_days",
-  "rows_total": 1251,
-  "rows_train": 1000,
-  "rows_test": 251,
+  "trained_at": "2026-06-27T05:06:46.667956+00:00",
+  "rows_total": 1000,
+  "rows_train": 800,
+  "rows_test": 200,
   "feature_columns": [
     "supplier_id",
     "sede_id",
@@ -60,5 +61,75 @@
     "tree_method": "hist",
     "validate_parameters": null,
     "verbosity": null
-  }
+  },
+  "dataset_report": {
+    "dataset_sources": [
+      "data\\raw\\dataset_lead_time_sintetico.csv"
+    ],
+    "source_count": 1,
+    "rows_input": 1000,
+    "rows_training": 1000,
+    "rows_matched_core": 612,
+    "rows_matched_order": 612,
+    "rows_matched_supplier": 1000,
+    "rows_matched_sede": 1000,
+    "rows_matched_product": 791,
+    "rows_matched_order_line": 11,
+    "used_full_dataset_fallback": true,
+    "source_reports": [
+      {
+        "dataset_source": "data\\raw\\dataset_lead_time_sintetico.csv",
+        "rows_input": 1000,
+        "rows_training": 1000,
+        "rows_matched_core": 612,
+        "rows_matched_order": 612,
+        "rows_matched_supplier": 1000,
+        "rows_matched_sede": 1000,
+        "rows_matched_product": 791,
+        "rows_matched_order_line": 11,
+        "core_match_ratio": 0.612,
+        "min_core_match_ratio": 0.6,
+        "min_core_match_rows": 200,
+        "used_full_dataset_fallback": true,
+        "table_sources": {
+          "ordenes_compra": "supabase",
+          "oc_lineas": "supabase",
+          "proveedores": "supabase",
+          "productos": "supabase",
+          "sedes": "supabase"
+        }
+      }
+    ]
+  },
+  "cleaning_report": {
+    "rows_out": 1000,
+    "rows_dropped": 0,
+    "missing_after_cleaning": {
+      "product_id": 2,
+      "product_tmpl_id": 2,
+      "product_name": 2,
+      "supplier_lead_time_decl": 136,
+      "supplier_min_qty": 136,
+      "supplier_price": 136,
+      "supabase_oc_id": 388,
+      "supabase_order_proveedor_id": 388,
+      "supabase_order_sede_id": 388,
+      "fecha_entrega_estimada": 388,
+      "fecha_entrega_real": 449,
+      "aprobado_at": 388,
+      "created_at": 388,
+      "supabase_producto_id": 209,
+      "sku_padre": 209,
+      "supabase_oc_linea_id": 989,
+      "oc_id": 989,
+      "producto_id": 989,
+      "qty_pedida": 989,
+      "qty_recibida": 989
+    }
+  },
+  "source_input": "dataset_lead_time_sintetico.csv",
+  "source_inputs": [
+    "data\\raw\\dataset_lead_time_sintetico.csv"
+  ],
+  "reference_dataset_output": "data\\processed\\dataset_lead_time_definitivo.csv"
 }

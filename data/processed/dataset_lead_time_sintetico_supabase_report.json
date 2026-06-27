@@ -1,0 +1,38 @@
+{
+  "dataset_source": "data\\raw\\dataset_lead_time_sintetico.csv",
+  "rows_input": 1000,
+  "rows_training": 612,
+  "rows_matched_core": 612,
+  "rows_matched_order": 612,
+  "rows_matched_supplier": 1000,
+  "rows_matched_sede": 1000,
+  "rows_matched_product": 791,
+  "rows_matched_order_line": 11,
+  "used_full_dataset_fallback": false,
+  "table_sources": {
+    "ordenes_compra": "supabase",
+    "oc_lineas": "supabase",
+    "proveedores": "supabase",
+    "productos": "supabase",
+    "sedes": "supabase"
+  },
+  "rows_out": 612,
+  "rows_dropped": 0,
+  "missing_after_cleaning": {
+    "product_id": 2,
+    "product_tmpl_id": 2,
+    "product_name": 2,
+    "supplier_lead_time_decl": 72,
+    "supplier_min_qty": 72,
+    "supplier_price": 72,
+    "fecha_entrega_real": 61,
+    "supabase_producto_id": 125,
+    "sku_padre": 125,
+    "supabase_oc_linea_id": 601,
+    "oc_id": 601,
+    "producto_id": 601,
+    "qty_pedida": 601,
+    "qty_recibida": 601
+  },
+  "output_path": "data\\processed\\dataset_lead_time_sintetico_supabase.csv"
+}

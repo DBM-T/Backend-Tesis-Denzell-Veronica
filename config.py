@@ -28,12 +28,15 @@ class Settings(BaseSettings):
     ml_models_dir: str = "./ml_models"
     xgboost_model_path: str = "./ml_models/xgboost_demanda.joblib"
     xgboost_lead_time_model_path: str = "./ml_models/xgboost_lead_time.joblib"
-    lead_time_dataset_path: str = "./data/processed/dataset_lead_time_clean.csv"
+    lead_time_raw_dataset_path: str = "./data/raw/dataset_lead_time.csv"
+    lead_time_dataset_path: str = "./data/processed/dataset_lead_time_supabase.csv"
     lightgbm_model_path: str = "./ml_models/lightgbm_prioridad.joblib"
 
     # App
     app_env: str = "development"
     app_cors_origins: str = "http://localhost:3000"
+    app_jwt_secret: str = "dev-local-auth-secret-change-me"
+    app_jwt_exp_minutes: int = 60 * 12
 
     @property
     def cors_origins(self) -> list[str]:

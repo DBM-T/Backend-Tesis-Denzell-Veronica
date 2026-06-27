@@ -51,6 +51,25 @@ def get_user_context(user_id: str, require_active: bool = True) -> dict[str, Any
     return _decorate_user_row(row)
 
 
+def get_user_context_by_email(email: str, require_active: bool = True) -> dict[str, Any] | None:
+    result = (
+        supabase_admin()
+        .table("usuarios")
+        .select(USER_SELECT)
+        .ilike("email", email)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return None
+
+    row = result.data[0]
+    if require_active and not row.get("activo", False):
+        return None
+
+    return _decorate_user_row(row)
+
+
 def list_user_contexts(*, include_inactive: bool = True) -> list[dict[str, Any]]:
     query = supabase_admin().table("usuarios").select(USER_SELECT).order("created_at", desc=True)
     result = query.execute()

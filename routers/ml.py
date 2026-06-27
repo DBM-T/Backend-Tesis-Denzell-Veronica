@@ -1,4 +1,5 @@
 """Endpoints ML para XGBoost y LightGBM."""
+from typing import Any
 from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
@@ -21,6 +22,7 @@ from schemas.ml import (
     ProviderScoreRequest,
 )
 from services.lead_time_model_service import find_lead_time_matches, predict_lead_time_days
+from services.lead_time_training_service import retrain_lead_time_model
 from services.access_control import ensure_action
 from services.postgrest_utils import encode_postgrest_payload
 
@@ -226,6 +228,18 @@ async def lead_time_matches(
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error obteniendo matches de lead time: {exc}")
+
+
+@router.post("/lead-time/retrain")
+async def retrain_lead_time_endpoint(
+    _user: CurrentUser = Depends(require_roles("superadmin", "admin")),
+) -> dict[str, Any]:
+    try:
+        return retrain_lead_time_model()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error reentrenando lead time: {exc}")
 
 
 @router.get("/demand/forecasts", response_model=list[DemandForecastOut])

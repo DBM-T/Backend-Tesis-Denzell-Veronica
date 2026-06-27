@@ -5,9 +5,9 @@ from pydantic import BaseModel
 from supabase import create_client
 from supabase_auth.errors import AuthApiError
 
-from auth import CurrentUser, get_current_user
+from auth import CurrentUser, _decode_supabase_jwt, create_local_app_token, get_current_user
 from config import get_settings
-from services.user_store import get_user_context, sync_usuario_from_auth
+from services.user_store import get_user_context, get_user_context_by_email, sync_usuario_from_auth
 
 router = APIRouter()
 _s = get_settings()
@@ -41,6 +41,20 @@ async def login(body: LoginRequest):
         detail = str(exc)
         logger.error(f"Error de Auth al iniciar sesion para {body.email}: {detail}")
         if "Database error" in detail:
+            if _s.app_env == "development":
+                data = get_user_context_by_email(body.email, require_active=True)
+                if not data:
+                    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciales invalidas")
+                local_token = create_local_app_token(data)
+                logger.warning(
+                    f"Usando fallback de login local en development para {body.email} por falla de Supabase Auth"
+                )
+                return TokenResponse(
+                    access_token=local_token,
+                    refresh_token=local_token,
+                    user_role=data.get("rol") or "tecnico",
+                    permissions=data.get("permisos") or {},
+                )
             raise HTTPException(
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
                 "Supabase Auth reporto un error interno al validar este usuario",
@@ -87,6 +101,16 @@ async def refresh_token(refresh_token: str):
         res = sb.auth.refresh_session(refresh_token)
         return {"access_token": res.session.access_token}
     except Exception:
+        if _s.app_env == "development":
+            try:
+                payload = _decode_supabase_jwt(refresh_token)
+                user_id = payload.get("sub")
+                if user_id:
+                    user = get_user_context(user_id, require_active=True)
+                    if user:
+                        return {"access_token": create_local_app_token(user)}
+            except Exception:
+                pass
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token de refresco invalido")
 
 

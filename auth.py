@@ -1,5 +1,6 @@
 """Dependencias de autenticacion y autorizacion para FastAPI."""
 from functools import lru_cache
+from datetime import datetime, timedelta, timezone
 
 import requests
 from fastapi import Depends, HTTPException, status
@@ -86,27 +87,57 @@ def _load_jwks() -> dict:
 
 def _decode_supabase_jwt(token: str) -> dict:
     if _s.supabase_jwks_url:
-        header = jwt.get_unverified_header(token)
-        key_id = header.get("kid")
-        jwks = _load_jwks()
-        keys = jwks.get("keys", [])
-        jwk_data = next((key for key in keys if key.get("kid") == key_id), None)
-        if not jwk_data:
-            raise JWTError("JWKS key not found")
-        public_key = jwk.construct(jwk_data, algorithm=header.get("alg", "RS256"))
-        return jwt.decode(
-            token,
-            public_key.to_pem().decode("utf-8"),
-            algorithms=[header.get("alg", "RS256")],
-            audience="authenticated",
-        )
+        try:
+            header = jwt.get_unverified_header(token)
+            key_id = header.get("kid")
+            jwks = _load_jwks()
+            keys = jwks.get("keys", [])
+            jwk_data = next((key for key in keys if key.get("kid") == key_id), None)
+            if not jwk_data:
+                raise JWTError("JWKS key not found")
+            public_key = jwk.construct(jwk_data, algorithm=header.get("alg", "RS256"))
+            return jwt.decode(
+                token,
+                public_key.to_pem().decode("utf-8"),
+                algorithms=[header.get("alg", "RS256")],
+                audience="authenticated",
+            )
+        except JWTError:
+            return _decode_local_app_jwt(token)
 
     if _s.supabase_jwt_secret:
-        return jwt.decode(
-            token,
-            _s.supabase_jwt_secret,
-            algorithms=["HS256"],
-            audience="authenticated",
-        )
+        try:
+            return jwt.decode(
+                token,
+                _s.supabase_jwt_secret,
+                algorithms=["HS256"],
+                audience="authenticated",
+            )
+        except JWTError:
+            return _decode_local_app_jwt(token)
 
-    raise JWTError("No JWT verification material configured")
+    return _decode_local_app_jwt(token)
+
+
+def _decode_local_app_jwt(token: str) -> dict:
+    return jwt.decode(
+        token,
+        _s.app_jwt_secret,
+        algorithms=["HS256"],
+        audience="authenticated",
+        issuer="local-backend",
+    )
+
+
+def create_local_app_token(user: dict) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user["id"],
+        "email": user.get("email"),
+        "role": user.get("rol"),
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=_s.app_jwt_exp_minutes)).timestamp()),
+        "aud": "authenticated",
+        "iss": "local-backend",
+    }
+    return jwt.encode(payload, _s.app_jwt_secret, algorithm="HS256")
