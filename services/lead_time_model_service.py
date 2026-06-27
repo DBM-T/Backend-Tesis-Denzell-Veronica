@@ -238,7 +238,24 @@ def _serialize_match(row: pd.Series) -> dict[str, Any]:
         "date_approve": row["date_approve"].isoformat() if pd.notna(row.get("date_approve")) else None,
         "effective_date": row["effective_date"].isoformat() if pd.notna(row.get("effective_date")) else None,
         "match_score": _safe_float(row.get("match_score")) or 0.0,
+        "match_level": _safe_text(row.get("match_level")),
     }
+
+
+def _match_pool_mask(df: pd.DataFrame, **criteria: str | None) -> pd.Series:
+    mask = pd.Series(True, index=df.index)
+    for column, value in criteria.items():
+        if value is None:
+            continue
+        mask = mask & (df[column] == value)
+    return mask
+
+
+def _pool_has_positive_lead_time(pool: pd.DataFrame) -> bool:
+    if pool.empty or "lead_time_days" not in pool.columns:
+        return False
+    lead_times = pd.to_numeric(pool["lead_time_days"], errors="coerce")
+    return bool((lead_times > 0).any())
 
 
 def find_lead_time_matches(payload: dict[str, Any], limit: int = 10) -> tuple[int, list[dict[str, Any]]]:
@@ -259,37 +276,84 @@ def find_lead_time_matches(payload: dict[str, Any], limit: int = 10) -> tuple[in
     df["warehouse_id"] = df["warehouse_id"].astype("Int64").astype("string")
     df["product_tmpl_id"] = df["product_tmpl_id"].astype("Int64").astype("string")
 
-    mask = pd.Series(False, index=df.index)
-    if request_product is not None:
-        mask = mask | (df["product_tmpl_id"] == request_product)
-    if request_supplier is not None:
-        mask = mask | (df["supplier_id"] == request_supplier)
-    if request_category:
-        mask = mask | (df["category"].fillna("SIN_CATEGORIA") == str(request_category))
-    if not mask.any():
-        mask = pd.Series(True, index=df.index)
+    candidate_pools: list[tuple[str, pd.DataFrame]] = []
+    request_category_value = str(request_category).strip() if request_category is not None else None
 
-    candidates = df.loc[mask].copy()
+    if request_product is not None and request_supplier is not None and request_sede is not None and request_warehouse is not None:
+        mask = _match_pool_mask(
+            df,
+            product_tmpl_id=request_product,
+            supplier_id=request_supplier,
+            sede_id=request_sede,
+            warehouse_id=request_warehouse,
+        )
+        candidate_pools.append(("exact_product_supplier_sede_warehouse", df.loc[mask].copy()))
+
+    if request_product is not None and request_supplier is not None and request_sede is not None:
+        mask = _match_pool_mask(df, product_tmpl_id=request_product, supplier_id=request_supplier, sede_id=request_sede)
+        candidate_pools.append(("exact_product_supplier_sede", df.loc[mask].copy()))
+
+    if request_product is not None and request_supplier is not None:
+        mask = _match_pool_mask(df, product_tmpl_id=request_product, supplier_id=request_supplier)
+        candidate_pools.append(("exact_product_supplier", df.loc[mask].copy()))
+
+    if request_supplier is not None and request_sede is not None and request_warehouse is not None:
+        mask = _match_pool_mask(df, supplier_id=request_supplier, sede_id=request_sede, warehouse_id=request_warehouse)
+        candidate_pools.append(("exact_supplier_sede_warehouse", df.loc[mask].copy()))
+
+    if request_supplier is not None and request_sede is not None:
+        mask = _match_pool_mask(df, supplier_id=request_supplier, sede_id=request_sede)
+        candidate_pools.append(("exact_supplier_sede", df.loc[mask].copy()))
+
+    if request_supplier is not None:
+        mask = _match_pool_mask(df, supplier_id=request_supplier)
+        candidate_pools.append(("exact_supplier", df.loc[mask].copy()))
+
+    if request_category_value:
+        mask = df["category"].fillna("SIN_CATEGORIA") == request_category_value
+        candidate_pools.append(("exact_category", df.loc[mask].copy()))
+
+    candidate_pools.append(("fallback", df.copy()))
+
+    selected_level = "fallback"
+    candidates = df.copy()
+    first_non_empty_level = "fallback"
+    first_non_empty_pool: pd.DataFrame | None = None
+    for level_name, pool in candidate_pools:
+        if pool.empty:
+            continue
+        if first_non_empty_pool is None:
+          first_non_empty_pool = pool.copy()
+          first_non_empty_level = level_name
+        if _pool_has_positive_lead_time(pool):
+            candidates = pool.copy()
+            selected_level = level_name
+            break
+    else:
+        if first_non_empty_pool is not None:
+            candidates = first_non_empty_pool
+            selected_level = first_non_empty_level
+
     candidates["match_score"] = 0.0
-    if request_product is not None:
-        candidates.loc[candidates["product_tmpl_id"] == request_product, "match_score"] += 5
+    candidates["match_level"] = selected_level
+    candidates["lead_time_positive"] = pd.to_numeric(candidates["lead_time_days"], errors="coerce").fillna(-1) > 0
+    if request_product is not None and selected_level.startswith("exact_product"):
+        candidates.loc[candidates["product_tmpl_id"] == request_product, "match_score"] += 6
     if request_supplier is not None:
         candidates.loc[candidates["supplier_id"] == request_supplier, "match_score"] += 4
     if request_sede is not None:
         candidates.loc[candidates["sede_id"] == request_sede, "match_score"] += 3
     if request_warehouse is not None:
         candidates.loc[candidates["warehouse_id"] == request_warehouse, "match_score"] += 2
-    if request_category:
-        candidates.loc[
-            candidates["category"].fillna("SIN_CATEGORIA") == str(request_category), "match_score"
-        ] += 1
+    if request_category_value:
+        candidates.loc[candidates["category"].fillna("SIN_CATEGORIA") == request_category_value, "match_score"] += 1
     if request_qty is not None:
         qty = float(request_qty)
         qty_distance = (pd.to_numeric(candidates["product_qty"], errors="coerce") - qty).abs().fillna(9999)
         candidates["match_score"] += (1 / (1 + qty_distance)).astype(float)
 
     candidates = candidates.sort_values(
-        by=["match_score", "date_approve"], ascending=[False, False]
+        by=["lead_time_positive", "match_score", "date_approve"], ascending=[False, False, False]
     )
     total = int(len(candidates))
     items = [_serialize_match(row) for _, row in candidates.head(limit).iterrows()]
