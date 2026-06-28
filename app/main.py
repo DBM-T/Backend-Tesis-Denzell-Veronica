@@ -8,7 +8,7 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logging import RequestContextLoggingMiddleware, setup_logging
 from app.core.scheduler import start_scheduler, stop_scheduler
 from app.ml.inference.runtime import preload_active_models
-from app.routers import alertas, auth, compras, maestros, ml, ordenes_trabajo, reportes, usuarios
+from app.routers import alertas, auth, compras, maestros, ml, ordenes_trabajo, reportes, usuarios, ventas
 from app.schemas.health import HealthResponse
 from app.services.health_service import build_health_response
 
@@ -54,6 +54,7 @@ app.include_router(compras.router, tags=["Compras"])
 app.include_router(ml.router, prefix="/ml", tags=["ML"])
 app.include_router(alertas.router, prefix="/alertas", tags=["Alertas"])
 app.include_router(reportes.router, prefix="/reportes", tags=["Reportes"])
+app.include_router(ventas.router, tags=["Ventas"])
 
 
 @app.get(

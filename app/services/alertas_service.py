@@ -150,7 +150,7 @@ async def build_dashboard_snapshot(client: AsyncClient, *, sede_id: str | None =
     params_query = client.table("parametros_inventario").select(
         "repuesto_id,sede_id,stock_minimo,punto_reorden_sugerido_ml"
     )
-    orders_query = client.table("ordenes_compra").select("id,estado,sede_id,fecha_entrega_comprometida")
+    orders_query = client.table("ordenes_compra").select("id,estado,pr_id,fecha_entrega_comprometida")
     alerts_query = client.table("alertas").select("id,sede_id,estado")
     demand_query = client.table("pronosticos_demanda").select("sede_id,demanda_proyectada")
     if sede_id is not None:
@@ -166,6 +166,11 @@ async def build_dashboard_snapshot(client: AsyncClient, *, sede_id: str | None =
     alerts = (await alerts_query.execute()).data or []
     demand = (await demand_query.execute()).data or []
     params_map = {(row["repuesto_id"], row["sede_id"]): row for row in params}
+    pr_ids = [row["pr_id"] for row in orders if row.get("pr_id")]
+    pr_map: dict[str, str] = {}
+    if pr_ids:
+        pr_response = await client.table("requisiciones_compra").select("id,sede_id").in_("id", pr_ids).execute()
+        pr_map = {row["id"]: row["sede_id"] for row in pr_response.data or []}
     stock_critical = 0
     for row in inventory:
         param = params_map.get((row["repuesto_id"], row["sede_id"]))
@@ -176,9 +181,27 @@ async def build_dashboard_snapshot(client: AsyncClient, *, sede_id: str | None =
         punto_ml = int(param.get("punto_reorden_sugerido_ml") or 0)
         if stock <= stock_minimo or (punto_ml and stock <= punto_ml):
             stock_critical += 1
-    orders_in_course = sum(1 for row in orders if row["estado"] in {PurchaseOrderStatus.aprobada.value, PurchaseOrderStatus.enviada.value, PurchaseOrderStatus.pendiente.value, PurchaseOrderStatus.pendiente_aprobacion.value, PurchaseOrderStatus.recibida_parcial.value})
+    orders_in_course = sum(
+        1
+        for row in orders
+        if row["estado"] in {
+            PurchaseOrderStatus.aprobada.value,
+            PurchaseOrderStatus.enviada.value,
+            PurchaseOrderStatus.pendiente.value,
+            PurchaseOrderStatus.pendiente_aprobacion.value,
+            PurchaseOrderStatus.recibida_parcial.value,
+        }
+        and (
+            sede_id is None
+            or str(row.get("sede_id") or pr_map.get(row.get("pr_id")) or "") == sede_id
+        )
+    )
     active_alerts = sum(1 for row in alerts if row["estado"] == AlertStatus.activa.value)
-    demand_total = sum(Decimal(str(row.get("demanda_proyectada") or 0)) for row in demand)
+    demand_total = sum(
+        Decimal(str(row.get("demanda_proyectada") or 0))
+        for row in demand
+        if sede_id is None or str(row.get("sede_id")) == sede_id
+    )
     return DashboardIndicadorRead(
         sede_id=UUID(sede_id) if sede_id else None,
         fecha_corte=date.today(),
@@ -238,8 +261,14 @@ async def refresh_alerts_and_dashboard() -> DashboardRefreshResult:
                 recomendaciones_creadas += 1
 
     today = date.today()
-    ocs = await client.table("ordenes_compra").select("id,estado,fecha_entrega_comprometida,sede_id").execute()
+    ocs = await client.table("ordenes_compra").select("id,estado,fecha_entrega_comprometida,pr_id").execute()
+    oc_pr_ids = [row["pr_id"] for row in (ocs.data or []) if row.get("pr_id")]
+    oc_pr_map: dict[str, str] = {}
+    if oc_pr_ids:
+        pr_response = await client.table("requisiciones_compra").select("id,sede_id").in_("id", oc_pr_ids).execute()
+        oc_pr_map = {row["id"]: row["sede_id"] for row in pr_response.data or []}
     for oc in ocs.data or []:
+        oc_sede_id = str(oc.get("sede_id") or oc_pr_map.get(oc.get("pr_id")) or "") or None
         if oc.get("fecha_entrega_comprometida") and oc["estado"] in {PurchaseOrderStatus.enviada.value, PurchaseOrderStatus.pendiente.value}:
             if str(oc["fecha_entrega_comprometida"]) < str(today):
                 before = await client.table("alertas").select("id").eq("tipo", AlertType.oc_retrasada.value).eq("estado", AlertStatus.activa.value).eq("orden_compra_id", oc["id"]).limit(1).execute()
@@ -249,7 +278,7 @@ async def refresh_alerts_and_dashboard() -> DashboardRefreshResult:
                             "tipo": AlertType.oc_retrasada.value,
                             "severidad": AlertSeverity.alta.value,
                             "orden_compra_id": oc["id"],
-                            "sede_id": oc.get("sede_id"),
+                            "sede_id": oc_sede_id,
                             "mensaje": "Orden de compra con fecha comprometida vencida.",
                         }
                     ).execute()
@@ -262,7 +291,7 @@ async def refresh_alerts_and_dashboard() -> DashboardRefreshResult:
                         "tipo": AlertType.oc_pendiente_aprobacion.value,
                         "severidad": AlertSeverity.media.value,
                         "orden_compra_id": oc["id"],
-                        "sede_id": oc.get("sede_id"),
+                        "sede_id": oc_sede_id,
                         "mensaje": "Orden de compra pendiente de aprobacion de gerencia.",
                     }
                 ).execute()

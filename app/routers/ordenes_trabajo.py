@@ -10,6 +10,8 @@ from app.schemas.operaciones import (
     AssignTechnicianRequest,
     ChangeWorkOrderStatusRequest,
     CompleteServiceResponse,
+    CloseWorkOrderRequest,
+    CloseWorkOrderResponse,
     DiagnosticRequest,
     InventoryMovementCreate,
     InventoryMovementRead,
@@ -23,6 +25,7 @@ from app.schemas.operaciones import (
     StockAvailabilityResponse,
     WorkOrderCreate,
     WorkOrderDiagnosticResponse,
+    WorkOrderListRead,
     WorkOrderRead,
 )
 from app.services.operaciones_service import (
@@ -36,6 +39,7 @@ from app.services.operaciones_service import (
     create_work_order,
     list_inventory_movements,
     list_prs,
+    list_work_orders,
     register_diagnostic,
     stock_available,
     update_pr_status,
@@ -49,6 +53,15 @@ router = APIRouter()
 @router.post("/ot", response_model=WorkOrderRead, summary="Crear OT")
 async def post_ot(payload: WorkOrderCreate, current_user: CurrentUser = Depends(get_current_user)):
     return await create_work_order(current_user.supabase, current_user, payload)
+
+
+@router.get("/ot", response_model=list[WorkOrderListRead], summary="Listar OT")
+async def get_ot(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return await list_work_orders(current_user.supabase, page=page, page_size=page_size)
 
 
 @router.put("/ot/{ot_id}/asignar-tecnico", response_model=WorkOrderRead, summary="Asignar tecnico")
@@ -101,9 +114,13 @@ async def put_ot_complete_service(ot_id: UUID, current_user: CurrentUser = Depen
     return await complete_service(current_user.supabase, current_user, str(ot_id))
 
 
-@router.put("/ot/{ot_id}/cerrar", response_model=WorkOrderRead, summary="Cerrar OT")
-async def put_ot_close(ot_id: UUID, current_user: CurrentUser = Depends(get_current_user)):
-    return await close_work_order(current_user.supabase, current_user, str(ot_id))
+@router.put("/ot/{ot_id}/cerrar", response_model=CloseWorkOrderResponse, summary="Cerrar OT y generar orden de venta")
+async def put_ot_close(
+    ot_id: UUID,
+    payload: CloseWorkOrderRequest | None = None,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return await close_work_order(current_user.supabase, current_user, str(ot_id), payload)
 
 
 @router.post("/requisiciones", response_model=PurchaseRequestRead, summary="Crear requisicion manual")

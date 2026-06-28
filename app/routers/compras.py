@@ -27,7 +27,10 @@ from app.services.compras_service import (
     create_rfq,
     create_recepcion_oc,
     get_rfq_ranking,
+    list_aprobaciones_proveedor,
+    list_ordenes_compra,
     list_recepciones_oc,
+    list_rfqs,
     send_rfq,
     update_orden_status,
     update_rfq_status,
@@ -35,6 +38,15 @@ from app.services.compras_service import (
 
 
 router = APIRouter()
+
+
+@router.get("/rfq", response_model=list[RFQRead], summary="Listar RFQ")
+async def get_rfqs(
+    page: int = 1,
+    page_size: int = 50,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return await list_rfqs(current_user.supabase, page=page, page_size=page_size)
 
 
 @router.post(
@@ -108,6 +120,15 @@ async def post_aprobacion_proveedor(
     return await create_aprobacion_proveedor(current_user.supabase, current_user, payload)
 
 
+@router.get("/aprobaciones-proveedor", response_model=list[AprobacionProveedorRead], summary="Listar aprobaciones de proveedor")
+async def get_aprobaciones_proveedor(
+    page: int = 1,
+    page_size: int = 50,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return await list_aprobaciones_proveedor(current_user.supabase, page=page, page_size=page_size)
+
+
 @router.post(
     "/ordenes-compra",
     response_model=OrdenCompraRead,
@@ -119,6 +140,15 @@ async def post_orden_compra(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     return await create_orden_compra(current_user.supabase, current_user, payload)
+
+
+@router.get("/ordenes-compra", response_model=list[OrdenCompraRead], summary="Listar ordenes de compra")
+async def get_ordenes_compra(
+    page: int = 1,
+    page_size: int = 50,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return await list_ordenes_compra(current_user.supabase, page=page, page_size=page_size)
 
 
 @router.put(

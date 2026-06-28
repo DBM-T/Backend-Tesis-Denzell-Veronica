@@ -1,9 +1,16 @@
 from datetime import datetime, date
+from decimal import Decimal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.schemas.enums import InventoryMoveType, PriorityML, PurchaseRequestStatus, WorkOrderStatus
+from app.schemas.enums import (
+    InventoryMoveType,
+    OrdenVentaStatus,
+    PriorityML,
+    PurchaseRequestStatus,
+    WorkOrderStatus,
+)
 from app.schemas.maestros import PaginatedResponse
 
 
@@ -163,6 +170,55 @@ class InventoryMovementFilters(BaseModel):
 class CompleteServiceResponse(BaseModel):
     orden_trabajo: WorkOrderRead
     historial_registrado: int
+
+
+class CloseWorkOrderRequest(BaseModel):
+    costo_servicio: Decimal = Field(default=Decimal("0"), ge=0)
+
+
+class OrdenVentaDetalleRead(BaseModel):
+    id: UUID
+    orden_venta_id: UUID
+    repuesto_id: UUID
+    codigo_sku: str
+    nombre_repuesto: str
+    cantidad: int
+    precio_unitario: Decimal
+    subtotal: Decimal
+    created_at: datetime
+
+
+class OrdenVentaRead(BaseModel):
+    id: UUID
+    codigo_ov: str
+    ot_id: UUID
+    sede_id: UUID
+    tecnico_id: UUID | None = None
+    costo_repuestos: Decimal
+    costo_servicio: Decimal
+    costo_total: Decimal
+    estado: OrdenVentaStatus
+    creado_por: UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+    detalle: list[OrdenVentaDetalleRead] = Field(default_factory=list)
+
+
+class CloseWorkOrderResponse(BaseModel):
+    orden_trabajo: WorkOrderRead
+    orden_venta: OrdenVentaRead
+
+
+class UpdateOrdenVentaCostoServicioRequest(BaseModel):
+    costo_servicio: Decimal = Field(ge=0)
+
+
+class CancelOrdenVentaResponse(BaseModel):
+    orden_venta: OrdenVentaRead
+
+
+class WorkOrderListRead(WorkOrderRead):
+    orden_venta: OrdenVentaRead | None = None
 
 
 PaginatedPurchaseRequestResponse = PaginatedResponse[PurchaseRequestRead]

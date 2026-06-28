@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 from fastapi import HTTPException, status
@@ -16,6 +17,8 @@ from app.schemas.operaciones import (
     AssignTechnicianRequest,
     ChangeWorkOrderStatusRequest,
     CompleteServiceResponse,
+    CloseWorkOrderRequest,
+    CloseWorkOrderResponse,
     DiagnosticRead,
     DiagnosticRequest,
     InventoryMovementCreate,
@@ -31,7 +34,9 @@ from app.schemas.operaciones import (
     WorkOrderCreate,
     WorkOrderDiagnosticResponse,
     WorkOrderRead,
+    WorkOrderListRead,
 )
+from app.services.ventas_service import get_sale_by_ot
 
 
 OT_TRANSITIONS: dict[WorkOrderStatus, set[WorkOrderStatus]] = {
@@ -405,17 +410,55 @@ async def complete_service(client: AsyncClient, current_user: CurrentUser, ot_id
     )
 
 
-async def close_work_order(client: AsyncClient, current_user: CurrentUser, ot_id: str) -> WorkOrderRead:
+async def close_work_order(
+    client: AsyncClient,
+    current_user: CurrentUser,
+    ot_id: str,
+    payload: CloseWorkOrderRequest | None = None,
+) -> CloseWorkOrderResponse:
     _require_roles(current_user, UserRole.asesor_servicio, UserRole.administrador)
     ot = await _fetch_work_order(client, ot_id)
-    _ensure_transition(ot.estado, WorkOrderStatus.completed)
-    response = await client.table("ordenes_trabajo").update(
+    if ot.estado not in {WorkOrderStatus.tech_completed, WorkOrderStatus.completed}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La OT debe estar en tech_completed o completed para generar la orden de venta.",
+        )
+
+    rpc_response = await client.rpc(
+        "fn_generar_orden_venta",
         {
-            "estado": WorkOrderStatus.completed.value,
-            "fecha_completado": _utcnow().isoformat(),
-        }
-    ).eq("id", ot_id).execute()
-    return _ot_row(response.data[0])
+            "p_ot_id": ot_id,
+            "p_costo_servicio": "0",
+        },
+    ).execute()
+    if rpc_response.data is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="No se pudo generar la orden de venta.",
+        )
+    orden_venta = await get_sale_by_ot(client, ot_id)
+    if orden_venta is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="La orden de venta se genero pero no se pudo recuperar.",
+        )
+
+    return CloseWorkOrderResponse(
+        orden_trabajo=await _fetch_work_order(client, ot_id),
+        orden_venta=orden_venta,
+    )
+
+
+async def list_work_orders(
+    client: AsyncClient,
+    *,
+    page: int,
+    page_size: int,
+) -> list[WorkOrderListRead]:
+    from app.services.ventas_service import list_work_orders as list_work_orders_with_sales
+
+    rows = await list_work_orders_with_sales(client, page=page, page_size=page_size)
+    return [WorkOrderListRead.model_validate(row) for row in rows]
 
 
 async def create_manual_pr(

@@ -1,0 +1,627 @@
+ESTRUCTURA ACTUAL DE BASE DE DATOS - BD-TP1-TESIS
+
+Fuente base: BD-TP1-TESIS.sql
+Actualizado con migraciones:
+- 003_fix_rls_policies_fase4.sql
+- 004_fix_rls_policies_fase5.sql
+- 005_fix_rls_policies_fase6.sql
+- 006_fix_rls_policies_fase7.sql
+- 007_ordenes_venta.sql
+- 008_ordenes_venta_flujo_nuevo.sql
+
+Resumen:
+Este archivo resume la estructura actual de la base en Supabase/PostgreSQL,
+incluyendo enums, tablas, relaciones, triggers, policies, indices y cambios
+recientes del flujo de ordenes de venta.
+
+============================================================
+ENUMS
+============================================================
+
+rol_usuario:
+- administrador
+- asesor_servicio
+- tecnico
+- almacenero
+- logistica
+- gerencia
+
+estado_usuario:
+- activo
+- inactivo
+
+estado_ot:
+- registrada
+- diagnostico
+- waiting_parts
+- in_progress
+- tech_completed
+- completed
+- cancelada
+
+prioridad_ml:
+- ALTA
+- BAJA
+
+estado_pr:
+- generada
+- en_cotizacion
+- aprobada
+- convertida_oc
+- cancelada
+
+estado_rfq:
+- enviada
+- respondida
+- vencida
+- cancelada
+
+estado_oc:
+- pendiente_aprobacion
+- aprobada
+- enviada
+- pendiente
+- retrasada
+- recibida_parcial
+- recibida
+- cerrada
+- rechazada
+
+estado_ov:
+- creada
+- con_costo_servicio
+- cancelada
+
+canal_compra:
+- local
+- importacion
+- distribuidor
+
+tipo_movimiento:
+- entrada_compra
+- salida_consumo
+- ajuste_positivo
+- ajuste_negativo
+- transferencia
+
+conformidad_recepcion:
+- conforme
+- no_conforme
+
+tipo_modelo_ml:
+- xgboost_demanda
+- xgboost_proveedor
+- xgboost_lead_time
+- lightgbm_prioridad
+
+estado_carga_csv:
+- cargado
+- validado
+- con_errores
+- procesado
+
+tipo_alerta:
+- punto_reorden
+- riesgo_quiebre
+- oc_retrasada
+- oc_pendiente_aprobacion
+- no_conformidad_proveedor
+
+severidad_alerta:
+- baja
+- media
+- alta
+
+estado_alerta:
+- activa
+- atendida
+- descartada
+
+============================================================
+TABLAS PRINCIPALES
+============================================================
+
+sedes
+- id uuid PK default gen_random_uuid()
+- nombre text not null
+- direccion text
+- telefono text
+- estado estado_usuario not null default 'activo'
+- created_at timestamptz not null default now()
+
+perfiles
+- id uuid PK references auth.users(id) on delete cascade
+- nombres text not null
+- apellidos text not null
+- email citext not null unique
+- rol rol_usuario not null
+- sede_id uuid references sedes(id)
+- estado estado_usuario not null default 'activo'
+- telefono text
+- created_at timestamptz not null default now()
+- updated_at timestamptz not null default now()
+
+sesiones_log
+- id bigint identity PK
+- usuario_id uuid not null references perfiles(id)
+- accion text not null check (accion in ('login','logout'))
+- ip text
+- created_at timestamptz not null default now()
+
+categorias
+- id uuid PK default gen_random_uuid()
+- nombre text not null
+- categoria_padre_id uuid references categorias(id)
+- created_at timestamptz not null default now()
+
+proveedores
+- id uuid PK default gen_random_uuid()
+- razon_social text not null
+- ruc text unique
+- contacto_nombre text
+- telefono text
+- email citext
+- direccion text
+- condiciones_pago text
+- lead_time_estimado_dias integer check (lead_time_estimado_dias >= 0)
+- canal_preferido canal_compra
+- estado estado_usuario not null default 'activo'
+- tasa_entrega_a_tiempo numeric(5,2) check between 0 and 100
+- tasa_defectos numeric(5,2) check between 0 and 100
+- precio_promedio numeric(12,2)
+- volumen_compras_previas integer default 0
+- created_at timestamptz not null default now()
+- updated_at timestamptz not null default now()
+
+repuestos
+- id uuid PK default gen_random_uuid()
+- codigo_sku text not null unique
+- nombre text not null
+- descripcion text
+- unidad_medida text not null default 'unidad'
+- categoria_id uuid references categorias(id)
+- marca_compatible text
+- sede_id uuid references sedes(id)
+- precio numeric(12,2) default 0
+- estado estado_usuario not null default 'activo'
+- created_at timestamptz not null default now()
+- updated_at timestamptz not null default now()
+
+parametros_inventario
+- id uuid PK default gen_random_uuid()
+- repuesto_id uuid not null references repuestos(id) on delete cascade
+- sede_id uuid not null references sedes(id) on delete cascade
+- stock_minimo integer not null default 0 check >= 0
+- stock_maximo integer check >= 0
+- lead_time_base_dias integer not null default 0 check >= 0
+- punto_reorden_inicial integer not null default 0 check >= 0
+- punto_reorden_sugerido_ml integer
+- created_at timestamptz not null default now()
+- updated_at timestamptz not null default now()
+- unique (repuesto_id, sede_id)
+
+inventario
+- id uuid PK default gen_random_uuid()
+- repuesto_id uuid not null references repuestos(id) on delete cascade
+- sede_id uuid not null references sedes(id) on delete cascade
+- stock_actual integer not null default 0 check (stock_actual >= 0)
+- updated_at timestamptz not null default now()
+- unique (repuesto_id, sede_id)
+
+ordenes_trabajo
+- id uuid PK default gen_random_uuid()
+- codigo_ot text not null unique
+- cliente_nombre text not null
+- cliente_documento text
+- cliente_telefono text
+- vehiculo_placa text
+- vehiculo_marca text
+- vehiculo_modelo text
+- vehiculo_anio integer
+- servicio_solicitado text not null
+- asesor_id uuid not null references perfiles(id)
+- tecnico_id uuid references perfiles(id)
+- sede_id uuid not null references sedes(id)
+- estado estado_ot not null default 'registrada'
+- prioridad_ml prioridad_ml
+- confianza_ml numeric(5,4) check between 0 and 1
+- fecha_diagnostico timestamptz
+- fecha_completado timestamptz
+- created_at timestamptz not null default now()
+- updated_at timestamptz not null default now()
+
+diagnosticos_ot
+- id uuid PK default gen_random_uuid()
+- ot_id uuid not null references ordenes_trabajo(id) on delete cascade
+- tecnico_id uuid not null references perfiles(id)
+- descripcion text not null
+- created_at timestamptz not null default now()
+
+ot_repuestos_requeridos
+- id uuid PK default gen_random_uuid()
+- ot_id uuid not null references ordenes_trabajo(id) on delete cascade
+- repuesto_id uuid not null references repuestos(id)
+- cantidad integer not null check (cantidad > 0)
+- created_at timestamptz not null default now()
+- unique (ot_id, repuesto_id)
+
+requisiciones_compra
+- id uuid PK default gen_random_uuid()
+- codigo_pr text not null unique
+- ot_id uuid references ordenes_trabajo(id)
+- sede_id uuid not null references sedes(id)
+- prioridad_heredada prioridad_ml
+- estado estado_pr not null default 'generada'
+- generado_automaticamente boolean not null default false
+- creado_por uuid references perfiles(id)
+- created_at timestamptz not null default now()
+- updated_at timestamptz not null default now()
+
+pr_detalle
+- id uuid PK default gen_random_uuid()
+- pr_id uuid not null references requisiciones_compra(id) on delete cascade
+- repuesto_id uuid not null references repuestos(id)
+- cantidad integer not null check (cantidad > 0)
+- unique (pr_id, repuesto_id)
+
+movimientos_inventario
+- id uuid PK default gen_random_uuid()
+- repuesto_id uuid not null references repuestos(id)
+- sede_id uuid not null references sedes(id)
+- tipo tipo_movimiento not null
+- cantidad integer not null check (cantidad <> 0)
+- ot_id uuid references ordenes_trabajo(id)
+- orden_compra_id uuid references ordenes_compra(id)
+- motivo text
+- registrado_por uuid not null references perfiles(id)
+- created_at timestamptz not null default now()
+
+rfq
+- id uuid PK default gen_random_uuid()
+- codigo_rfq text not null unique
+- pr_id uuid not null references requisiciones_compra(id)
+- proveedor_id uuid not null references proveedores(id)
+- fecha_limite_respuesta date
+- condiciones_comerciales text
+- estado estado_rfq not null default 'enviada'
+- enviado_automaticamente boolean not null default false
+- creado_por uuid references perfiles(id)
+- created_at timestamptz not null default now()
+
+rfq_detalle
+- id uuid PK default gen_random_uuid()
+- rfq_id uuid not null references rfq(id) on delete cascade
+- repuesto_id uuid not null references repuestos(id)
+- cantidad integer not null check (cantidad > 0)
+
+rfq_respuestas
+- id uuid PK default gen_random_uuid()
+- rfq_id uuid not null references rfq(id) on delete cascade
+- repuesto_id uuid not null references repuestos(id)
+- precio_unitario numeric(12,2) not null check (precio_unitario >= 0)
+- disponibilidad boolean not null default true
+- lead_time_ofrecido_dias integer check (lead_time_ofrecido_dias >= 0)
+- registrado_por uuid references perfiles(id)
+- created_at timestamptz not null default now()
+
+ranking_proveedores_ml
+- id uuid PK default gen_random_uuid()
+- rfq_id uuid references rfq(id)
+- proveedor_id uuid not null references proveedores(id)
+- repuesto_id uuid references repuestos(id)
+- score_total_ml numeric(6,4) not null
+- ranking_posicion integer not null check (ranking_posicion > 0)
+- canal_sugerido_ml canal_compra
+- version_modelo text
+- created_at timestamptz not null default now()
+
+aprobaciones_proveedor
+- id uuid PK default gen_random_uuid()
+- rfq_id uuid not null references rfq(id)
+- proveedor_seleccionado_id uuid not null references proveedores(id)
+- coincide_con_recomendacion_ml boolean not null
+- justificacion text
+- aprobado_por uuid not null references perfiles(id)
+- created_at timestamptz not null default now()
+- check justificacion_requerida_si_difiere:
+  coincide_con_recomendacion_ml = true OR justificacion IS NOT NULL
+
+ordenes_compra
+- id uuid PK default gen_random_uuid()
+- codigo_oc text not null unique
+- pr_id uuid references requisiciones_compra(id)
+- ot_id uuid references ordenes_trabajo(id)
+- proveedor_id uuid not null references proveedores(id)
+- rfq_id uuid references rfq(id)
+- monto_total numeric(14,2) not null check (monto_total >= 0)
+- condiciones_pago text
+- fecha_entrega_comprometida date
+- canal_compra canal_compra
+- estado estado_oc not null default 'pendiente'
+- requiere_aprobacion_gerencia boolean not null default false
+- aprobado_por_gerencia_id uuid references perfiles(id)
+- fecha_aprobacion_gerencia timestamptz
+- creado_por uuid references perfiles(id)
+- created_at timestamptz not null default now()
+- updated_at timestamptz not null default now()
+
+oc_detalle
+- id uuid PK default gen_random_uuid()
+- oc_id uuid not null references ordenes_compra(id) on delete cascade
+- repuesto_id uuid not null references repuestos(id)
+- cantidad integer not null check (cantidad > 0)
+- precio_unitario numeric(12,2) not null check (precio_unitario >= 0)
+- unique (oc_id, repuesto_id)
+
+recepciones_oc
+- id uuid PK default gen_random_uuid()
+- oc_id uuid not null references ordenes_compra(id)
+- fecha_recepcion timestamptz not null default now()
+- recibido_por uuid not null references perfiles(id)
+- created_at timestamptz not null default now()
+
+recepciones_oc_detalle
+- id uuid PK default gen_random_uuid()
+- recepcion_id uuid not null references recepciones_oc(id) on delete cascade
+- repuesto_id uuid not null references repuestos(id)
+- cantidad_recibida integer not null check (cantidad_recibida >= 0)
+- conformidad conformidad_recepcion not null
+- evidencia_url text
+- observaciones text
+
+ordenes_venta
+- id uuid PK default gen_random_uuid()
+- codigo_ov text not null unique default ('OV-' || lpad(nextval('ordenes_venta_codigo_seq')::text, 4, '0'))
+- ot_id uuid not null unique references ordenes_trabajo(id) on delete restrict
+- sede_id uuid not null references sedes(id) on delete restrict
+- tecnico_id uuid references perfiles(id) on delete set null
+- costo_repuestos numeric(12,2) not null default 0
+- costo_servicio numeric(12,2) not null default 0
+- costo_total numeric(12,2) not null default 0
+- estado text not null default 'creada' check in ('creada','con_costo_servicio','cancelada')
+- creado_por uuid references perfiles(id) on delete set null
+- created_at timestamptz not null default now()
+- updated_at timestamptz not null default now()
+
+ordenes_venta_detalle
+- id uuid PK default gen_random_uuid()
+- orden_venta_id uuid not null references ordenes_venta(id) on delete cascade
+- repuesto_id uuid not null references repuestos(id) on delete restrict
+- codigo_sku text not null
+- nombre_repuesto text not null
+- cantidad integer not null check (cantidad > 0)
+- precio_unitario numeric(12,2) not null default 0
+- subtotal numeric(12,2) not null default 0
+- created_at timestamptz not null default now()
+
+cargas_csv
+- id uuid PK default gen_random_uuid()
+- tipo_dato text not null check in ('consumo','movimientos','compras','proveedores','quiebres_stock')
+- nombre_archivo text not null
+- estado estado_carga_csv not null default 'cargado'
+- filas_totales integer
+- filas_validas integer
+- filas_con_error integer
+- cargado_por uuid not null references perfiles(id)
+- created_at timestamptz not null default now()
+
+validaciones_csv
+- id uuid PK default gen_random_uuid()
+- carga_id uuid not null references cargas_csv(id) on delete cascade
+- tipo_incidencia text not null check in ('duplicado','nulo','formato_invalido','rango_inconsistente')
+- fila_referencia integer
+- detalle text
+- created_at timestamptz not null default now()
+
+historial_consumo
+- id uuid PK default gen_random_uuid()
+- repuesto_id uuid not null references repuestos(id)
+- sede_id uuid not null references sedes(id)
+- ot_id uuid references ordenes_trabajo(id)
+- vehiculo_marca text
+- vehiculo_modelo text
+- vehiculo_anio integer
+- cantidad_consumida integer not null check (cantidad_consumida > 0)
+- fecha_consumo timestamptz not null default now()
+- origen_carga_id uuid references cargas_csv(id)
+- created_at timestamptz not null default now()
+
+modelos_ml
+- id uuid PK default gen_random_uuid()
+- tipo_modelo tipo_modelo_ml not null
+- version text not null
+- descripcion text
+- activo boolean not null default true
+- entrenado_en timestamptz
+- aprobado_por uuid references perfiles(id)
+- created_at timestamptz not null default now()
+- unique (tipo_modelo, version)
+
+inferencias_ml
+- id uuid PK default gen_random_uuid()
+- modelo_id uuid not null references modelos_ml(id)
+- ejecutado_por uuid references perfiles(id)
+- parametros_entrada jsonb
+- resultado jsonb
+- created_at timestamptz not null default now()
+
+pronosticos_demanda
+- id uuid PK default gen_random_uuid()
+- repuesto_id uuid not null references repuestos(id)
+- sede_id uuid not null references sedes(id)
+- modelo_id uuid references modelos_ml(id)
+- demanda_proyectada numeric(12,2) not null
+- lead_time_estimado_dias numeric(6,2)
+- punto_reorden_sugerido integer
+- periodo_inicio date
+- periodo_fin date
+- created_at timestamptz not null default now()
+
+riesgo_abastecimiento_ml
+- id uuid PK default gen_random_uuid()
+- repuesto_id uuid not null references repuestos(id)
+- sede_id uuid not null references sedes(id)
+- modelo_id uuid references modelos_ml(id)
+- nivel_riesgo text not null check in ('bajo','medio','alto')
+- confianza_ml numeric(5,4) check between 0 and 1
+- created_at timestamptz not null default now()
+
+alertas
+- id uuid PK default gen_random_uuid()
+- tipo tipo_alerta not null
+- severidad severidad_alerta not null default 'media'
+- estado estado_alerta not null default 'activa'
+- repuesto_id uuid references repuestos(id)
+- sede_id uuid references sedes(id)
+- orden_compra_id uuid references ordenes_compra(id)
+- proveedor_id uuid references proveedores(id)
+- mensaje text not null
+- atendido_por uuid references perfiles(id)
+- atendido_en timestamptz
+- created_at timestamptz not null default now()
+
+recomendaciones_compra
+- id uuid PK default gen_random_uuid()
+- repuesto_id uuid not null references repuestos(id)
+- sede_id uuid not null references sedes(id)
+- cantidad_sugerida integer not null check (cantidad_sugerida > 0)
+- fecha_sugerida date
+- proveedor_sugerido_id uuid references proveedores(id)
+- modelo_id uuid references modelos_ml(id)
+- justificacion_ml text
+- atendida boolean not null default false
+- created_at timestamptz not null default now()
+
+dashboard_indicadores
+- id uuid PK default gen_random_uuid()
+- sede_id uuid references sedes(id)
+- fecha_corte date not null default current_date
+- stock_critico_count integer default 0
+- ordenes_en_curso_count integer default 0
+- alertas_activas_count integer default 0
+- demanda_proyectada_total numeric(14,2) default 0
+- created_at timestamptz not null default now()
+
+reportes_generados
+- id uuid PK default gen_random_uuid()
+- tipo_reporte text not null check in ('consumo','compras','alertas','lead_time','desempeno_proveedores')
+- fecha_inicio date not null
+- fecha_fin date not null
+- formato text not null default 'csv' check in ('csv','pdf','xlsx')
+- generado_por uuid not null references perfiles(id)
+- url_archivo text
+- created_at timestamptz not null default now()
+
+indicadores_validacion
+- id uuid PK default gen_random_uuid()
+- nombre_indicador text not null
+- valor_as_is numeric(14,4)
+- valor_to_be numeric(14,4)
+- unidad text
+- observaciones text
+- created_at timestamptz not null default now()
+
+plan_continuidad
+- id uuid PK default gen_random_uuid()
+- tipo text not null check in ('respaldo','mantenimiento','actualizacion_modelo')
+- descripcion text not null
+- frecuencia text
+- responsable_id uuid references perfiles(id)
+- created_at timestamptz not null default now()
+
+============================================================
+TRIGGERS Y FUNCIONES CLAVE
+============================================================
+
+fn_set_updated_at()
+- Actualiza updated_at con now() en tablas que lo usan.
+
+fn_rol_actual()
+- Devuelve el rol del usuario actual consultando perfiles por auth.uid().
+
+fn_on_ot_waiting_parts()
+- Trigger after update on ordenes_trabajo.
+- Al pasar OT a waiting_parts, genera PR automatica.
+
+fn_on_recepcion_conforme()
+- Trigger after insert on recepciones_oc_detalle.
+- Si conformidad = conforme, actualiza stock e inserta movimiento entrada_compra.
+- Si no conforme, penaliza proveedor.
+
+fn_on_salida_consumo()
+- Trigger after insert on movimientos_inventario.
+- Actualiza stock segun salida_consumo, ajuste_positivo y ajuste_negativo.
+
+fn_generar_orden_venta(p_ot_id, p_costo_servicio)
+- Crea ordenes_venta y ordenes_venta_detalle al cerrar OT.
+- Estado inicial actual: creada.
+- No crea OV duplicada si ya existe.
+
+fn_actualizar_orden_venta_costo_servicio(p_ov_id, p_costo_servicio)
+- Actualiza costo_servicio.
+- Recalcula costo_total.
+- Cambia estado a con_costo_servicio.
+
+fn_cancelar_orden_venta(p_ov_id)
+- Cancela una OV solo si esta en con_costo_servicio.
+
+============================================================
+RLS / POLICIES
+============================================================
+
+La base usa RLS por rol mediante fn_rol_actual().
+
+Policies relevantes:
+- perfiles: solo propio perfil o administrador
+- sesiones_log: propio usuario o administrador
+- repuestos: administrador, logistica
+- proveedores: administrador, logistica
+- ordenes_trabajo: administrador, asesor_servicio, tecnico
+- diagnosticos_ot: administrador, tecnico
+- movimientos_inventario: administrador, almacenero, tecnico
+- rfq: administrador, logistica
+- aprobaciones_proveedor: administrador, logistica
+- ordenes_compra: administrador, logistica; gerencia solo puede actualizar si estado = pendiente_aprobacion
+- recepciones_oc: administrador, almacenero
+- recepciones_oc_detalle: administrador, almacenero
+- alertas: administrador, almacenero, logistica, gerencia, asesor_servicio, tecnico
+- ordenes_venta: select para roles operativos; insert/update para administrador, asesoria/logistica segun flujo
+
+Policies agregadas por migraciones recientes:
+- categorias: insert/update para administrador, logistica
+- parametros_inventario: insert/update para administrador, logistica
+- ot_repuestos_requeridos: insert/update/delete para administrador, tecnico
+- requisiciones_compra: insert/update para administrador, almacenero, logistica
+- pr_detalle: insert/update/delete para administrador, almacenero, logistica
+- historial_consumo: insert para administrador, tecnico, logistica
+
+============================================================
+INDICES IMPORTANTES
+============================================================
+
+- idx_perfiles_rol on perfiles(rol)
+- idx_repuestos_sede on repuestos(sede_id)
+- idx_repuestos_categoria on repuestos(categoria_id)
+- idx_inventario_repuesto_sede on inventario(repuesto_id, sede_id)
+- idx_ot_estado on ordenes_trabajo(estado)
+- idx_ot_sede on ordenes_trabajo(sede_id)
+- idx_pr_estado on requisiciones_compra(estado)
+- idx_oc_estado on ordenes_compra(estado)
+- idx_movimientos_repuesto on movimientos_inventario(repuesto_id, sede_id)
+- idx_historial_consumo_repuesto on historial_consumo(repuesto_id, sede_id)
+- idx_alertas_estado on alertas(estado)
+- idx_ranking_rfq on ranking_proveedores_ml(rfq_id)
+- idx_ordenes_venta_ot_id on ordenes_venta(ot_id)
+- idx_ordenes_venta_codigo_ov on ordenes_venta(codigo_ov)
+- idx_ordenes_venta_estado on ordenes_venta(estado)
+- idx_ordenes_venta_detalle_ov_id on ordenes_venta_detalle(orden_venta_id)
+- idx_ordenes_venta_detalle_repuesto_id on ordenes_venta_detalle(repuesto_id)
+
+============================================================
+NOTAS
+============================================================
+
+- UTC se usa en timestamptz; Lima opera en UTC-5 en la capa de presentacion.
+- OT -> PR -> RFQ -> OC -> Recepcion -> OV es el flujo principal.
+- Las OVs nacen al cerrar OT y luego reciben costo de servicio en un paso aparte.
+- El archivo se debe mantener sincronizado con nuevas migraciones, no editando el SQL base original.

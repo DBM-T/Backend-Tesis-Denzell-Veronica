@@ -35,6 +35,8 @@ from app.services.maestros_service import (
     delete_repuesto,
     list_categorias,
     list_categorias_tree,
+    list_categorias_public,
+    list_categorias_tree_public,
     list_inventario,
     list_inventario_critico,
     list_parametros_inventario,
@@ -68,8 +70,7 @@ async def get_categorias(
     q: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    return await list_categorias(
-        current_user.supabase,
+    return await list_categorias_public(
         page=page,
         page_size=page_size,
         parent_id=parent_id,
@@ -84,7 +85,7 @@ async def get_categorias(
     description="Devuelve el arbol completo de categorias con sus hijos anidados.",
 )
 async def get_categorias_tree(current_user: CurrentUser = Depends(get_current_user)):
-    return await list_categorias_tree(current_user.supabase)
+    return await list_categorias_tree_public()
 
 
 @router.post(
@@ -361,7 +362,7 @@ async def get_inventario(
     description="Devuelve repuestos por debajo de stock minimo o punto de reorden.",
 )
 async def get_inventario_criticos(
-    sede_id: UUID = Query(...),
+    sede_id: UUID | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     current_user: CurrentUser = Depends(get_current_user),

@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from supabase._async.client import AsyncClient
 
+from app.core.supabase_client import create_service_role_client
 from app.schemas.enums import UserRole, UserStatus
 from app.schemas.maestros import (
     CategoriaCreate,
@@ -134,6 +135,28 @@ async def list_categorias_tree(client: AsyncClient) -> list[CategoriaTreeNode]:
         else:
             roots.append(node)
     return roots
+
+
+async def list_categorias_public(
+    *,
+    page: int,
+    page_size: int,
+    parent_id: UUID | None = None,
+    q: str | None = None,
+) -> PaginatedResponse[CategoriaRead]:
+    service_client = await create_service_role_client()
+    return await list_categorias(
+        service_client,
+        page=page,
+        page_size=page_size,
+        parent_id=parent_id,
+        q=q,
+    )
+
+
+async def list_categorias_tree_public() -> list[CategoriaTreeNode]:
+    service_client = await create_service_role_client()
+    return await list_categorias_tree(service_client)
 
 
 async def create_categoria(client: AsyncClient, payload: CategoriaCreate) -> CategoriaRead:
@@ -418,7 +441,7 @@ async def list_inventario(
 async def list_inventario_critico(
     client: AsyncClient,
     *,
-    sede_id: UUID,
+    sede_id: UUID | None,
     page: int,
     page_size: int,
 ) -> PaginatedResponse[InventarioCriticoRead]:

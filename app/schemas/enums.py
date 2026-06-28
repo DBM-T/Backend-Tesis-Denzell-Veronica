@@ -57,6 +57,12 @@ class PurchaseOrderStatus(str, Enum):
     rechazada = "rechazada"
 
 
+class OrdenVentaStatus(str, Enum):
+    creada = "creada"
+    con_costo_servicio = "con_costo_servicio"
+    cancelada = "cancelada"
+
+
 class PurchaseChannel(str, Enum):
     local = "local"
     importacion = "importacion"

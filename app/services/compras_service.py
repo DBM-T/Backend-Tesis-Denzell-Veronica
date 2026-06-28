@@ -88,6 +88,41 @@ async def _fetch_oc(client: AsyncClient, oc_id: str) -> OrdenCompraRead:
     return _oc_read(response.data, [OrdenCompraDetalleRead.model_validate(row) for row in details.data or []])
 
 
+async def list_rfqs(client: AsyncClient, *, page: int, page_size: int) -> list[RFQRead]:
+    start = max(page - 1, 0) * page_size
+    response = await client.table("rfq").select(
+        "id,codigo_rfq,pr_id,proveedor_id,fecha_limite_respuesta,condiciones_comerciales,estado,"
+        "enviado_automaticamente,creado_por,created_at"
+    ).order("created_at", desc=True).range(start, start + page_size - 1).execute()
+    result: list[RFQRead] = []
+    for row in response.data or []:
+        details = await client.table("rfq_detalle").select("id,rfq_id,repuesto_id,cantidad").eq("rfq_id", row["id"]).execute()
+        result.append(_rfq_read(row, [RFQDetalleRead.model_validate(item) for item in details.data or []]))
+    return result
+
+
+async def list_aprobaciones_proveedor(client: AsyncClient, *, page: int, page_size: int) -> list[AprobacionProveedorRead]:
+    start = max(page - 1, 0) * page_size
+    response = await client.table("aprobaciones_proveedor").select(
+        "id,rfq_id,proveedor_seleccionado_id,coincide_con_recomendacion_ml,justificacion,aprobado_por,created_at"
+    ).order("created_at", desc=True).range(start, start + page_size - 1).execute()
+    return [AprobacionProveedorRead.model_validate(row) for row in response.data or []]
+
+
+async def list_ordenes_compra(client: AsyncClient, *, page: int, page_size: int) -> list[OrdenCompraRead]:
+    start = max(page - 1, 0) * page_size
+    response = await client.table("ordenes_compra").select(
+        "id,codigo_oc,pr_id,ot_id,proveedor_id,rfq_id,monto_total,condiciones_pago,fecha_entrega_comprometida,"
+        "canal_compra,estado,requiere_aprobacion_gerencia,aprobado_por_gerencia_id,fecha_aprobacion_gerencia,"
+        "creado_por,created_at,updated_at"
+    ).order("created_at", desc=True).range(start, start + page_size - 1).execute()
+    result: list[OrdenCompraRead] = []
+    for row in response.data or []:
+        details = await client.table("oc_detalle").select("id,oc_id,repuesto_id,cantidad,precio_unitario").eq("oc_id", row["id"]).execute()
+        result.append(_oc_read(row, [OrdenCompraDetalleRead.model_validate(item) for item in details.data or []]))
+    return result
+
+
 async def _get_rfq_detail_map(client: AsyncClient, rfq_id: str) -> dict[str, dict]:
     response = await client.table("rfq_detalle").select("repuesto_id,cantidad").eq("rfq_id", rfq_id).execute()
     return {row["repuesto_id"]: row for row in response.data or []}
