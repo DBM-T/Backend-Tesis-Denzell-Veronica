@@ -6,6 +6,9 @@ from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -35,7 +38,7 @@ class Settings(BaseSettings):
         default=Decimal("1500.00"),
         alias="OC_LIMITE_APROBACION_GERENCIA",
     )
-    ml_models_dir: Path = Field(default=Path("app/ml/models"), alias="ML_MODELS_DIR")
+    ml_models_dir: Path = Field(default=BASE_DIR / "app" / "ml" / "models", alias="ML_MODELS_DIR")
     ml_priority_high_threshold: float = Field(default=0.90, alias="ML_PRIORITY_HIGH_THRESHOLD")
     ml_priority_low_threshold: float = Field(default=0.10, alias="ML_PRIORITY_LOW_THRESHOLD")
     reports_bucket: str = Field(default="reports", alias="REPORTS_BUCKET")
@@ -44,6 +47,7 @@ class Settings(BaseSettings):
         default="http://localhost:3000",
         alias="CORS_ORIGINS",
     )
+    cors_origin_regex: str | None = Field(default=None, alias="CORS_ORIGIN_REGEX")
 
     @field_validator("cors_origins_raw", mode="before")
     @classmethod

@@ -1,15 +1,19 @@
 from supabase import acreate_client
 from supabase._async.client import AsyncClient
-from supabase.lib.client_options import AsyncClientOptions
+
+try:
+    from supabase.lib.client_options import AsyncClientOptions as _SupabaseClientOptions
+except ImportError:  # compatibilidad con versiones donde solo existe ClientOptions
+    from supabase.lib.client_options import ClientOptions as _SupabaseClientOptions
 
 from app.core.config import get_settings
 
 
-def _build_options(access_token: str | None = None) -> AsyncClientOptions:
+def _build_options(access_token: str | None = None) -> _SupabaseClientOptions:
     headers: dict[str, str] = {}
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
-    return AsyncClientOptions(
+    return _SupabaseClientOptions(
         headers=headers,
         auto_refresh_token=False,
         persist_session=False,

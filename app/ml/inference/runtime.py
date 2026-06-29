@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import ceil, expm1
 from pathlib import Path
 from typing import Any
 
 import joblib
 from starlette.concurrency import run_in_threadpool
+
+try:
+    from xgboost import XGBRegressor
+except Exception:  # pragma: no cover - compatibilidad cuando xgboost no esta disponible
+    XGBRegressor = None
 
 from app.core.config import get_settings
 from app.core.supabase_client import create_service_role_client
@@ -88,6 +94,27 @@ class DemandaResult:
     source: str
 
 
+@dataclass(slots=True)
+class LeadTimeFeatures:
+    compra_id: str
+    proveedor_id: str | None
+    lead_time_estimado_dias: float
+    monto_total: float
+    cantidad_lineas: float
+    cantidad_total_unidades: float
+    mes_pedido: float
+
+
+@dataclass(slots=True)
+class LeadTimeResult:
+    lead_time_predicho_dias: float
+    lead_time_predicho_redondeado_dias: int
+    confianza_ml: float
+    modelo_id: str | None
+    version_modelo: str | None
+    source: str
+
+
 MODEL_CACHE: dict[MLModelType, ActiveModel] = {}
 
 
@@ -99,6 +126,56 @@ def _model_path(tipo_modelo: MLModelType, version: str) -> Path:
     return get_settings().ml_models_dir / tipo_modelo.value / version / "model.joblib"
 
 
+def _fallback_xgboost_path(tipo_modelo: MLModelType, version: str) -> Path:
+    return get_settings().ml_models_dir / tipo_modelo.value / version / "model.json"
+
+
+async def _load_artifact(tipo: MLModelType, version: str) -> tuple[Any | None, Path | None]:
+    artifact = None
+    loaded_from: Path | None = None
+    artifact_path = _model_path(tipo, version)
+    if tipo.value.startswith("xgboost_") and XGBRegressor is not None:
+        fallback_path = _fallback_xgboost_path(tipo, version)
+        if fallback_path.exists():
+            try:
+                booster = XGBRegressor()
+                booster.load_model(fallback_path)
+                artifact = booster
+                loaded_from = fallback_path
+            except Exception:
+                artifact = None
+    if artifact is None and artifact_path.exists():
+        try:
+            artifact = await run_in_threadpool(joblib.load, artifact_path)
+            loaded_from = artifact_path
+        except Exception:
+            artifact = None
+    return artifact, loaded_from
+
+
+async def _preload_local_models() -> None:
+    models_dir = get_settings().ml_models_dir
+    for tipo in MLModelType:
+        if tipo in MODEL_CACHE and MODEL_CACHE[tipo].artifact is not None:
+            continue
+        model_root = models_dir / tipo.value
+        if not model_root.exists():
+            continue
+        versions = sorted((path.name for path in model_root.iterdir() if path.is_dir()), reverse=True)
+        for version in versions:
+            artifact, loaded_from = await _load_artifact(tipo, version)
+            if artifact is None:
+                continue
+            MODEL_CACHE[tipo] = ActiveModel(
+                model_id=f"local-{tipo.value}-{version}",
+                tipo_modelo=tipo,
+                version=version,
+                artifact_path=loaded_from,
+                artifact=artifact,
+            )
+            break
+
+
 async def preload_active_models() -> None:
     MODEL_CACHE.clear()
     try:
@@ -107,24 +184,20 @@ async def preload_active_models() -> None:
             "id,tipo_modelo,version,activo"
         ).eq("activo", True).execute()
     except Exception:
+        await _preload_local_models()
         return
 
     for row in response.data or []:
         tipo = MLModelType(row["tipo_modelo"])
-        artifact_path = _model_path(tipo, row["version"])
-        artifact = None
-        if artifact_path.exists():
-            try:
-                artifact = await run_in_threadpool(joblib.load, artifact_path)
-            except Exception:
-                artifact = None
+        artifact, loaded_from = await _load_artifact(tipo, row["version"])
         MODEL_CACHE[tipo] = ActiveModel(
             model_id=str(row["id"]),
             tipo_modelo=tipo,
             version=row["version"],
-            artifact_path=artifact_path if artifact_path.exists() else None,
+            artifact_path=loaded_from,
             artifact=artifact,
         )
+    await _preload_local_models()
 
 
 def get_active_model(tipo_modelo: MLModelType) -> ActiveModel | None:
@@ -230,11 +303,30 @@ def predecir_demanda(features: DemandaFeatures) -> DemandaResult:
                 features.lead_time_base_dias or 0,
             ]]
             if hasattr(model.artifact, "predict"):
-                prediction = float(model.artifact.predict(payload)[0])
-                rondon = max(1, int(round(prediction / 2)))
+                raw_prediction = float(model.artifact.predict(payload)[0])
+                prediction = max(expm1(raw_prediction), 0.0)
                 lead = max(1.0, features.lead_time_base_dias or 7.0)
-                riesgo = "alto" if prediction > max(features.stock_actual or 0, 0) else "medio"
-                return DemandaResult(prediction, lead, rondon, riesgo, 0.75, model.model_id, model.version, "xgboost")
+                stock_actual = max(features.stock_actual or 0, 0)
+                stock_minimo = max(features.stock_minimo or 0, 0)
+                demanda_diaria = max(prediction, 0.0) / 30.0
+                rondon = max(1, int(ceil((demanda_diaria * lead) + stock_minimo)))
+                if stock_actual <= stock_minimo or stock_actual < rondon:
+                    riesgo = "alto"
+                elif stock_actual < (rondon * 1.25):
+                    riesgo = "medio"
+                else:
+                    riesgo = "bajo"
+                confidence = 0.8 if riesgo != "medio" else 0.72
+                return DemandaResult(
+                    round(prediction, 2),
+                    round(lead, 2),
+                    rondon,
+                    riesgo,
+                    confidence,
+                    model.model_id,
+                    model.version,
+                    "xgboost_log1p",
+                )
         except Exception:
             pass
 
@@ -251,3 +343,42 @@ def predecir_demanda(features: DemandaFeatures) -> DemandaResult:
         risk = "bajo"
     confidence = 0.65 if risk == "medio" else 0.75
     return DemandaResult(round(projected, 2), round(lead, 2), rondon, risk, confidence, model.model_id if model else None, model.version if model else None, "heuristic_fallback")
+
+
+def predecir_lead_time_compra(features: LeadTimeFeatures) -> LeadTimeResult:
+    model = get_active_model(MLModelType.xgboost_lead_time)
+    if model and model.artifact is not None:
+        try:
+            payload = [[
+                features.lead_time_estimado_dias,
+                features.monto_total,
+                features.cantidad_lineas,
+                features.cantidad_total_unidades,
+                features.mes_pedido,
+            ]]
+            if hasattr(model.artifact, "predict"):
+                raw_prediction = float(model.artifact.predict(payload)[0])
+                prediction = max(expm1(raw_prediction), 0.0)
+                rounded = max(0, int(round(prediction)))
+                return LeadTimeResult(
+                    lead_time_predicho_dias=round(prediction, 2),
+                    lead_time_predicho_redondeado_dias=rounded,
+                    confianza_ml=0.74,
+                    modelo_id=model.model_id,
+                    version_modelo=model.version,
+                    source="xgboost_log1p",
+                )
+        except Exception:
+            pass
+
+    baseline = max(features.lead_time_estimado_dias or 0.0, 0.0)
+    if baseline == 0:
+        baseline = 1.0 if features.cantidad_lineas <= 2 else 2.0
+    return LeadTimeResult(
+        lead_time_predicho_dias=round(baseline, 2),
+        lead_time_predicho_redondeado_dias=max(0, int(round(baseline))),
+        confianza_ml=0.6,
+        modelo_id=model.model_id if model else None,
+        version_modelo=model.version if model else None,
+        source="heuristic_fallback",
+    )

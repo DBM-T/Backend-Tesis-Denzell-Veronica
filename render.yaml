@@ -35,3 +35,5 @@ services:
         value: 5
       - key: CORS_ORIGINS
         value: https://motrix-9tofvb4t7-denzellito17-1790s-projects.vercel.app,http://localhost:3000
+      - key: CORS_ORIGIN_REGEX
+        value: ^https://.*\.vercel\.app$

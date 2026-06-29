@@ -4,7 +4,7 @@ import csv
 import io
 from collections import Counter
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
@@ -39,6 +39,41 @@ class CsvValidationIssue:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _estado_alerta_desde_resultado(
+    *,
+    demanda_proyectada: Decimal | int | float,
+    punto_reorden_sugerido: int | None,
+    nivel_riesgo: str,
+) -> str:
+    demanda = float(demanda_proyectada)
+    reorder = float(punto_reorden_sugerido or 0)
+    if demanda > 0 and reorder <= 0:
+        return "CRITICA"
+    if reorder > 0 and demanda >= reorder * 1.25:
+        return "CRITICA"
+    if nivel_riesgo == "alto":
+        return "URGENTE"
+    if nivel_riesgo == "medio":
+        return "PREVENTIVA"
+    return "SALUDABLE"
+
+
+def _periodo_label(periodo_inicio: date | None, periodo_fin: date | None) -> str | None:
+    if periodo_inicio is None or periodo_fin is None:
+        return None
+    return f"{periodo_inicio.isoformat()} a {periodo_fin.isoformat()}"
+
+
+async def _build_reference_maps(client: AsyncClient) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict]]:
+    repuestos_response = await client.table("repuestos").select("id,codigo_sku,nombre").execute()
+    sedes_response = await client.table("sedes").select("id,nombre").execute()
+    modelos_response = await client.table("modelos_ml").select("id,tipo_modelo,version").execute()
+    repuestos = {str(row["id"]): row for row in repuestos_response.data or []}
+    sedes = {str(row["id"]): row for row in sedes_response.data or []}
+    modelos = {str(row["id"]): row for row in modelos_response.data or []}
+    return repuestos, sedes, modelos
 
 
 def _require_roles(current_user: CurrentUser, *roles: UserRole) -> None:
@@ -311,7 +346,9 @@ async def list_pronosticos_demanda(
     repuesto_id: UUID | None = None,
     sede_id: UUID | None = None,
 ) -> list[PronosticoDemandaRead]:
-    query = client.table("pronosticos_demanda").select(
+    del client
+    service_client = await create_service_role_client()
+    query = service_client.table("pronosticos_demanda").select(
         "id,repuesto_id,sede_id,modelo_id,demanda_proyectada,lead_time_estimado_dias,punto_reorden_sugerido,periodo_inicio,periodo_fin,created_at"
     ).order("created_at", desc=True)
     if repuesto_id is not None:
@@ -319,7 +356,40 @@ async def list_pronosticos_demanda(
     if sede_id is not None:
         query = query.eq("sede_id", str(sede_id))
     response = await query.execute()
-    return [PronosticoDemandaRead.model_validate(row) for row in response.data or []]
+    repuestos, sedes, modelos = await _build_reference_maps(service_client)
+
+    enriched_rows: list[PronosticoDemandaRead] = []
+    for row in response.data or []:
+        repuesto = repuestos.get(str(row["repuesto_id"]), {})
+        sede = sedes.get(str(row["sede_id"]), {})
+        modelo = modelos.get(str(row["modelo_id"]), {})
+        periodo_inicio = date.fromisoformat(row["periodo_inicio"]) if row.get("periodo_inicio") else None
+        periodo_fin = date.fromisoformat(row["periodo_fin"]) if row.get("periodo_fin") else None
+        estado_alerta = _estado_alerta_desde_resultado(
+            demanda_proyectada=Decimal(str(row["demanda_proyectada"])),
+            punto_reorden_sugerido=row.get("punto_reorden_sugerido"),
+            nivel_riesgo="alto"
+            if Decimal(str(row["demanda_proyectada"])) >= Decimal(str(row.get("punto_reorden_sugerido") or 0))
+            else "bajo",
+        )
+        enriched_rows.append(
+            PronosticoDemandaRead.model_validate(
+                {
+                    **row,
+                    "codigo_sku": repuesto.get("codigo_sku"),
+                    "repuesto_nombre": repuesto.get("nombre"),
+                    "sede_nombre": sede.get("nombre"),
+                    "modelo_utilizado": (
+                        f"{modelo.get('tipo_modelo', 'xgboost_demanda')} {modelo.get('version', '')}".strip()
+                        if modelo
+                        else None
+                    ),
+                    "estado_alerta": estado_alerta,
+                    "periodo_label": _periodo_label(periodo_inicio, periodo_fin),
+                }
+            )
+        )
+    return enriched_rows
 
 
 async def list_riesgo_abastecimiento(
@@ -328,7 +398,9 @@ async def list_riesgo_abastecimiento(
     repuesto_id: UUID | None = None,
     sede_id: UUID | None = None,
 ) -> list[RiesgoAbastecimientoRead]:
-    query = client.table("riesgo_abastecimiento_ml").select(
+    del client
+    service_client = await create_service_role_client()
+    query = service_client.table("riesgo_abastecimiento_ml").select(
         "id,repuesto_id,sede_id,modelo_id,nivel_riesgo,confianza_ml,created_at"
     ).order("created_at", desc=True)
     if repuesto_id is not None:
@@ -336,7 +408,35 @@ async def list_riesgo_abastecimiento(
     if sede_id is not None:
         query = query.eq("sede_id", str(sede_id))
     response = await query.execute()
-    return [RiesgoAbastecimientoRead.model_validate(row) for row in response.data or []]
+    repuestos, sedes, modelos = await _build_reference_maps(service_client)
+
+    enriched_rows: list[RiesgoAbastecimientoRead] = []
+    for row in response.data or []:
+        repuesto = repuestos.get(str(row["repuesto_id"]), {})
+        sede = sedes.get(str(row["sede_id"]), {})
+        modelo = modelos.get(str(row["modelo_id"]), {})
+        estado_alerta = _estado_alerta_desde_resultado(
+            demanda_proyectada=0,
+            punto_reorden_sugerido=None,
+            nivel_riesgo=str(row["nivel_riesgo"]),
+        )
+        enriched_rows.append(
+            RiesgoAbastecimientoRead.model_validate(
+                {
+                    **row,
+                    "codigo_sku": repuesto.get("codigo_sku"),
+                    "repuesto_nombre": repuesto.get("nombre"),
+                    "sede_nombre": sede.get("nombre"),
+                    "modelo_utilizado": (
+                        f"{modelo.get('tipo_modelo', 'xgboost_demanda')} {modelo.get('version', '')}".strip()
+                        if modelo
+                        else None
+                    ),
+                    "estado_alerta": estado_alerta,
+                }
+            )
+        )
+    return enriched_rows
 
 
 async def recalculate_demand(
@@ -359,7 +459,12 @@ async def recalculate_demand(
 
     processed = 0
     pronosticos_creados = 0
+    pronosticos_insertados = 0
+    pronosticos_actualizados = 0
     riesgo_actualizado = 0
+    latest_summary: dict | None = None
+    periodo_inicio = date.today()
+    periodo_fin = periodo_inicio + timedelta(days=30)
     for row in params_response.data or []:
         processed += 1
         features, parametros_entrada = await recolectar_features_demanda(
@@ -393,17 +498,15 @@ async def recalculate_demand(
             "demanda_proyectada": str(result.demanda_proyectada),
             "lead_time_estimado_dias": str(result.lead_time_estimado_dias),
             "punto_reorden_sugerido": result.punto_reorden_sugerido,
+            "periodo_inicio": periodo_inicio.isoformat(),
+            "periodo_fin": periodo_fin.isoformat(),
         }
         if existing.data:
             await client.table("pronosticos_demanda").update(payload).eq("id", existing.data[0]["id"]).execute()
+            pronosticos_actualizados += 1
         else:
-            payload.update(
-                {
-                    "periodo_inicio": None,
-                    "periodo_fin": None,
-                }
-            )
             await client.table("pronosticos_demanda").insert(payload).execute()
+            pronosticos_insertados += 1
         pronosticos_creados += 1
 
         await client.table("riesgo_abastecimiento_ml").insert(
@@ -420,9 +523,38 @@ async def recalculate_demand(
         await client.table("parametros_inventario").update(
             {"punto_reorden_sugerido_ml": result.punto_reorden_sugerido}
         ).eq("repuesto_id", str(row["repuesto_id"])).eq("sede_id", str(row["sede_id"])).execute()
+        estado_alerta = _estado_alerta_desde_resultado(
+            demanda_proyectada=result.demanda_proyectada,
+            punto_reorden_sugerido=result.punto_reorden_sugerido,
+            nivel_riesgo=result.nivel_riesgo,
+        )
+        latest_summary = {
+            "demanda_proyectada": str(result.demanda_proyectada),
+            "punto_reorden_sugerido": result.punto_reorden_sugerido,
+            "nivel_riesgo": result.nivel_riesgo,
+            "confianza_ml": str(result.confianza_ml),
+            "repuesto_id": str(row["repuesto_id"]),
+            "sede_id": str(row["sede_id"]),
+            "source": result.source,
+            "estado_alerta": estado_alerta,
+            "periodo_inicio": periodo_inicio.isoformat(),
+            "periodo_fin": periodo_fin.isoformat(),
+        }
 
     return RecalcularDemandaResponse(
         procesados=processed,
         pronosticos_creados=pronosticos_creados,
+        pronosticos_insertados=pronosticos_insertados,
+        pronosticos_actualizados=pronosticos_actualizados,
         riesgo_actualizado=riesgo_actualizado,
+        demanda_proyectada=latest_summary["demanda_proyectada"] if latest_summary else None,
+        punto_reorden_sugerido=latest_summary["punto_reorden_sugerido"] if latest_summary else None,
+        nivel_riesgo=latest_summary["nivel_riesgo"] if latest_summary else None,
+        confianza_ml=latest_summary["confianza_ml"] if latest_summary else None,
+        repuesto_id=latest_summary["repuesto_id"] if latest_summary else None,
+        sede_id=latest_summary["sede_id"] if latest_summary else None,
+        estado_alerta=latest_summary["estado_alerta"] if latest_summary else None,
+        periodo_inicio=latest_summary["periodo_inicio"] if latest_summary else None,
+        periodo_fin=latest_summary["periodo_fin"] if latest_summary else None,
+        source=latest_summary["source"] if latest_summary else None,
     )

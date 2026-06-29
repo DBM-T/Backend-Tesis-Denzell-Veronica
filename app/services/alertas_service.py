@@ -166,12 +166,18 @@ async def build_dashboard_snapshot(client: AsyncClient, *, sede_id: str | None =
     orders_query = client.table("ordenes_compra").select("id,estado,pr_id,fecha_entrega_comprometida")
     alerts_query = client.table("alertas").select("id,sede_id,estado")
     demand_query = client.table("pronosticos_demanda").select("sede_id,demanda_proyectada")
+    scoped_pr_ids: list[str] = []
     if sede_id is not None:
         inventory_query = inventory_query.eq("sede_id", sede_id)
         params_query = params_query.eq("sede_id", sede_id)
-        orders_query = orders_query.eq("sede_id", sede_id)
         alerts_query = alerts_query.eq("sede_id", sede_id)
         demand_query = demand_query.eq("sede_id", sede_id)
+        pr_response = await client.table("requisiciones_compra").select("id").eq("sede_id", sede_id).execute()
+        scoped_pr_ids = [row["id"] for row in (pr_response.data or []) if row.get("id")]
+        if scoped_pr_ids:
+            orders_query = orders_query.in_("pr_id", scoped_pr_ids)
+        else:
+            orders_query = orders_query.limit(0)
 
     inventory_response, params_response, orders_response, alerts_response, demand_response = await asyncio.gather(
         inventory_query.execute(),

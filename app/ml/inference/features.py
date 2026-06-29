@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime, timedelta
 from statistics import mean
 
 from fastapi import HTTPException, status
 from supabase._async.client import AsyncClient
 
-from app.ml.inference.runtime import DemandaFeatures, PrioridadOTFeatures, RankingProveedorCandidate
+from app.ml.inference.runtime import DemandaFeatures, LeadTimeFeatures, PrioridadOTFeatures, RankingProveedorCandidate
 
 
 async def recolectar_features_prioridad_ot(
@@ -101,7 +102,7 @@ async def recolectar_features_demanda(
 ) -> tuple[DemandaFeatures, dict]:
     history = await client.table("historial_consumo").select(
         "cantidad_consumida,fecha_consumo"
-    ).eq("repuesto_id", repuesto_id).eq("sede_id", sede_id).order("fecha_consumo", desc=True).execute()
+    ).eq("repuesto_id", repuesto_id).eq("sede_id", sede_id).order("fecha_consumo", desc=False).execute()
     params_response = await client.table("parametros_inventario").select(
         "stock_minimo,lead_time_base_dias,punto_reorden_sugerido_ml"
     ).eq("repuesto_id", repuesto_id).eq("sede_id", sede_id).limit(1).execute()
@@ -109,10 +110,27 @@ async def recolectar_features_demanda(
         "stock_actual"
     ).eq("repuesto_id", repuesto_id).eq("sede_id", sede_id).limit(1).execute()
 
-    cantidades = [float(row["cantidad_consumida"]) for row in history.data or []]
+    history_rows = list(history.data or [])
+    cantidades = [float(row["cantidad_consumida"]) for row in history_rows]
     promedio = mean(cantidades) if cantidades else 0.0
-    consumo_90d = float(sum(cantidades[-10:])) if cantidades else 0.0
-    tendencia = (cantidades[-1] - cantidades[0]) if len(cantidades) >= 2 else promedio
+
+    recent_rows: list[dict] = []
+    if history_rows:
+        latest_date = datetime.fromisoformat(str(history_rows[-1]["fecha_consumo"]).replace("Z", "+00:00"))
+        cutoff = latest_date - timedelta(days=90)
+        recent_rows = [
+            row
+            for row in history_rows
+            if datetime.fromisoformat(str(row["fecha_consumo"]).replace("Z", "+00:00")) >= cutoff
+        ]
+    recent_quantities = [float(row["cantidad_consumida"]) for row in recent_rows]
+    consumo_90d = float(sum(recent_quantities)) if recent_quantities else 0.0
+    if len(recent_quantities) >= 2:
+        tendencia = recent_quantities[-1] - recent_quantities[0]
+    elif len(cantidades) >= 2:
+        tendencia = cantidades[-1] - cantidades[0]
+    else:
+        tendencia = promedio
 
     params = params_response.data[0] if params_response.data else {}
     inventory = inventory_response.data[0] if inventory_response.data else {}
@@ -135,4 +153,61 @@ async def recolectar_features_demanda(
         "stock_actual": features.stock_actual,
         "stock_minimo": features.stock_minimo,
         "lead_time_base_dias": features.lead_time_base_dias,
+    }
+
+
+async def recolectar_features_lead_time_compra(
+    client: AsyncClient,
+    oc_id: str,
+) -> tuple[LeadTimeFeatures, dict]:
+    oc_response = await client.table("ordenes_compra").select(
+        "id,proveedor_id,monto_total,created_at,rfq_id"
+    ).eq("id", oc_id).single().execute()
+    if not oc_response.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OC no encontrada.")
+
+    oc = oc_response.data
+    detail_response = await client.table("oc_detalle").select("cantidad").eq("oc_id", oc_id).execute()
+    detail_rows = list(detail_response.data or [])
+    cantidad_lineas = float(len(detail_rows))
+    cantidad_total_unidades = float(sum(int(row.get("cantidad") or 0) for row in detail_rows))
+
+    provider_response = await client.table("proveedores").select(
+        "lead_time_estimado_dias"
+    ).eq("id", str(oc.get("proveedor_id"))).limit(1).execute()
+    provider = provider_response.data[0] if provider_response.data else {}
+
+    rfq_estimated_days: list[float] = []
+    if oc.get("rfq_id"):
+        rfq_responses = await client.table("rfq_respuestas").select(
+            "lead_time_ofrecido_dias"
+        ).eq("rfq_id", str(oc["rfq_id"])).execute()
+        for row in rfq_responses.data or []:
+            if row.get("lead_time_ofrecido_dias") is not None:
+                rfq_estimated_days.append(float(row["lead_time_ofrecido_dias"]))
+
+    if rfq_estimated_days:
+        lead_time_estimado_dias = float(mean(rfq_estimated_days))
+    else:
+        lead_time_estimado_dias = float(provider.get("lead_time_estimado_dias") or 0)
+
+    created_at = datetime.fromisoformat(str(oc["created_at"]).replace("Z", "+00:00"))
+    mes_pedido = float(created_at.month)
+    features = LeadTimeFeatures(
+        compra_id=oc_id,
+        proveedor_id=str(oc.get("proveedor_id")) if oc.get("proveedor_id") else None,
+        lead_time_estimado_dias=float(lead_time_estimado_dias),
+        monto_total=float(oc.get("monto_total") or 0),
+        cantidad_lineas=cantidad_lineas,
+        cantidad_total_unidades=cantidad_total_unidades,
+        mes_pedido=mes_pedido,
+    )
+    return features, {
+        "compra_id": oc_id,
+        "proveedor_id": features.proveedor_id,
+        "lead_time_estimado_dias": features.lead_time_estimado_dias,
+        "monto_total": features.monto_total,
+        "cantidad_lineas": features.cantidad_lineas,
+        "cantidad_total_unidades": features.cantidad_total_unidades,
+        "mes_pedido": features.mes_pedido,
     }

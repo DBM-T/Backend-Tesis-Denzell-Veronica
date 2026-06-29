@@ -132,6 +132,11 @@ class OrdenCompraRead(BaseModel):
     creado_por: UUID | None = None
     created_at: datetime
     updated_at: datetime
+    lead_time_predicho_dias: Decimal | None = None
+    lead_time_predicho_redondeado_dias: int | None = None
+    lead_time_confianza_ml: Decimal | None = None
+    lead_time_modelo_version: str | None = None
+    lead_time_source: str | None = None
     detalle: list["OrdenCompraDetalleRead"] = Field(default_factory=list)
 
 

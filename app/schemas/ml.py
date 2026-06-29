@@ -60,6 +60,12 @@ class PronosticoDemandaRead(BaseModel):
     punto_reorden_sugerido: int | None = None
     periodo_inicio: date | None = None
     periodo_fin: date | None = None
+    codigo_sku: str | None = None
+    repuesto_nombre: str | None = None
+    sede_nombre: str | None = None
+    modelo_utilizado: str | None = None
+    estado_alerta: Literal["SALUDABLE", "PREVENTIVA", "URGENTE", "CRITICA"] | None = None
+    periodo_label: str | None = None
     created_at: datetime
 
 
@@ -70,10 +76,27 @@ class RiesgoAbastecimientoRead(BaseModel):
     modelo_id: UUID | None = None
     nivel_riesgo: Literal["bajo", "medio", "alto"]
     confianza_ml: Decimal | None = None
+    codigo_sku: str | None = None
+    repuesto_nombre: str | None = None
+    sede_nombre: str | None = None
+    modelo_utilizado: str | None = None
+    estado_alerta: Literal["SALUDABLE", "PREVENTIVA", "URGENTE", "CRITICA"] | None = None
     created_at: datetime
 
 
 class RecalcularDemandaResponse(BaseModel):
     procesados: int
     pronosticos_creados: int
+    pronosticos_insertados: int = 0
+    pronosticos_actualizados: int = 0
     riesgo_actualizado: int
+    demanda_proyectada: Decimal | None = None
+    punto_reorden_sugerido: int | None = None
+    nivel_riesgo: Literal["bajo", "medio", "alto"] | None = None
+    confianza_ml: Decimal | None = None
+    repuesto_id: UUID | None = None
+    sede_id: UUID | None = None
+    estado_alerta: Literal["SALUDABLE", "PREVENTIVA", "URGENTE", "CRITICA"] | None = None
+    periodo_inicio: date | None = None
+    periodo_fin: date | None = None
+    source: str | None = None

@@ -9,6 +9,8 @@ from uuid import uuid4
 from fastapi import HTTPException, status
 from supabase._async.client import AsyncClient
 
+from app.ml.inference.features import recolectar_features_lead_time_compra
+from app.ml.inference.runtime import predecir_lead_time_compra
 from app.ml.inference.ranking_service import generate_ranking_for_rfq
 from app.services.maestros_service import list_proveedores
 from app.services.operaciones_service import list_prs
@@ -62,6 +64,25 @@ def _oc_read(row: dict, detalle: list[OrdenCompraDetalleRead] | None = None) -> 
     payload = dict(row)
     payload["detalle"] = detalle or []
     return OrdenCompraRead.model_validate(payload)
+
+
+async def _attach_lead_time_prediction(client: AsyncClient, row: dict) -> dict:
+    payload = dict(row)
+    try:
+        features, _ = await recolectar_features_lead_time_compra(client, str(row["id"]))
+        result = predecir_lead_time_compra(features)
+        payload.update(
+            {
+                "lead_time_predicho_dias": str(result.lead_time_predicho_dias),
+                "lead_time_predicho_redondeado_dias": result.lead_time_predicho_redondeado_dias,
+                "lead_time_confianza_ml": str(result.confianza_ml),
+                "lead_time_modelo_version": result.version_modelo,
+                "lead_time_source": result.source,
+            }
+        )
+    except Exception:
+        logger.warning("No se pudo enriquecer la OC %s con prediccion de lead time.", row.get("id"), exc_info=True)
+    return payload
 
 
 def _group_rows_by(rows: list, key_getter) -> dict[str, list]:
@@ -159,7 +180,8 @@ async def _fetch_oc(client: AsyncClient, oc_id: str) -> OrdenCompraRead:
     if not response.data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OC no encontrada.")
     details = await client.table("oc_detalle").select("id,oc_id,repuesto_id,cantidad,precio_unitario").eq("oc_id", oc_id).execute()
-    return _oc_read(response.data, await _enrich_oc_details(client, details.data or []))
+    enriched_row = await _attach_lead_time_prediction(client, response.data)
+    return _oc_read(enriched_row, await _enrich_oc_details(client, details.data or []))
 
 
 async def list_rfqs(client: AsyncClient, *, page: int, page_size: int) -> list[RFQRead]:
@@ -190,7 +212,8 @@ async def list_ordenes_compra(client: AsyncClient, *, page: int, page_size: int)
     ).order("created_at", desc=True).range(start, start + page_size - 1).execute()
     rows = response.data or []
     detail_map = await _fetch_oc_detail_map(client, [str(row["id"]) for row in rows])
-    return [_oc_read(row, detail_map.get(str(row["id"]), [])) for row in rows]
+    enriched_rows = await asyncio.gather(*(_attach_lead_time_prediction(client, row) for row in rows))
+    return [_oc_read(row, detail_map.get(str(row["id"]), [])) for row in enriched_rows]
 
 
 async def get_compras_workspace(client: AsyncClient, *, page_size: int = 100) -> ComprasWorkspaceRead:
