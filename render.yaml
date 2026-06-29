@@ -13,9 +13,9 @@ services:
         value: production
       - key: SUPABASE_URL
         sync: false
-      - key: SUPABASE_ANON_KEY
+      - key: SUPABASE_PUBLISHABLE_KEY
         sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
+      - key: SUPABASE_SECRET_KEY
         sync: false
       - key: SUPABASE_JWKS_URL
         sync: false
@@ -34,4 +34,4 @@ services:
       - key: AUTH_RATE_LIMIT_PER_MINUTE
         value: 5
       - key: CORS_ORIGINS
-        sync: false
+        value: https://motrix-9tofvb4t7-denzellito17-1790s-projects.vercel.app,http://localhost:3000
