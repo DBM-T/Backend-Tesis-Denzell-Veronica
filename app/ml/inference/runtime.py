@@ -131,11 +131,25 @@ def get_active_model(tipo_modelo: MLModelType) -> ActiveModel | None:
     return MODEL_CACHE.get(tipo_modelo)
 
 
+def _priority_thresholds() -> tuple[float, float]:
+    settings = get_settings()
+    low = float(settings.ml_priority_low_threshold)
+    high = float(settings.ml_priority_high_threshold)
+    if low >= high:
+        low, high = 0.10, 0.90
+    return low, high
+
+
 def _score_to_priority(score: float) -> tuple[PriorityML, float]:
     score = max(0.0, min(score, 0.999))
-    priority = PriorityML.ALTA if score >= 0.5 else PriorityML.BAJA
-    confidence = score if priority == PriorityML.ALTA else 1 - score
-    return priority, round(confidence, 4)
+    low_threshold, high_threshold = _priority_thresholds()
+    if score >= high_threshold:
+        return PriorityML.ALTA, round(score, 4)
+    if score <= low_threshold:
+        return PriorityML.BAJA, round(1 - score, 4)
+
+    abstention_confidence = max(high_threshold - score, score - low_threshold) / max(high_threshold - low_threshold, 1e-9)
+    return PriorityML.REVISAR, round(1 - abstention_confidence, 4)
 
 
 def predecir_prioridad_ot(features: PrioridadOTFeatures) -> PrioridadOTResult:
@@ -151,11 +165,11 @@ def predecir_prioridad_ot(features: PrioridadOTFeatures) -> PrioridadOTResult:
                 probabilities = model.artifact.predict_proba(payload)[0]
                 positive = float(probabilities[1]) if len(probabilities) > 1 else float(probabilities[0])
                 priority, confidence = _score_to_priority(positive)
-                return PrioridadOTResult(priority, confidence, model.model_id, model.version, "lightgbm")
+                return PrioridadOTResult(priority, confidence, model.model_id, model.version, "lightgbm_selective")
             if hasattr(model.artifact, "predict"):
                 prediction = model.artifact.predict(payload)[0]
                 priority = PriorityML.ALTA if str(prediction).upper() in {"1", "ALTA", "TRUE"} else PriorityML.BAJA
-                return PrioridadOTResult(priority, 0.75, model.model_id, model.version, "lightgbm")
+                return PrioridadOTResult(priority, 0.75, model.model_id, model.version, "lightgbm_binary")
         except Exception:
             pass
 
@@ -169,7 +183,7 @@ def predecir_prioridad_ot(features: PrioridadOTFeatures) -> PrioridadOTResult:
     if "motor" in features.servicio_solicitado.lower():
         score += 0.15
     priority, confidence = _score_to_priority(score)
-    return PrioridadOTResult(priority, confidence, model.model_id if model else None, model.version if model else None, "heuristic_fallback")
+    return PrioridadOTResult(priority, confidence, model.model_id if model else None, model.version if model else None, "heuristic_selective")
 
 
 def _score_provider(candidate: RankingProveedorCandidate) -> float:

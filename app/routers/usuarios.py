@@ -1,8 +1,10 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from supabase._async.client import AsyncClient
 
 from app.core.security import get_current_user, require_role
+from app.core.supabase_client import create_service_role_client
 from app.schemas.auth import CurrentUser
 from app.schemas.enums import UserRole, UserStatus
 from app.schemas.sedes import SedeCreate, SedeRead, SedeUpdate
@@ -22,19 +24,35 @@ from app.services.users_service import (
 router = APIRouter()
 
 
+async def _catalog_client_for_user(current_user: CurrentUser) -> AsyncClient:
+    if current_user.role == UserRole.asesor_servicio:
+        return await create_service_role_client()
+    return current_user.supabase
+
+
 @router.get(
     "",
     response_model=list[UsuarioRead],
     summary="Listar usuarios",
-    description="Lista usuarios con filtros por rol, sede y estado. Solo administrador.",
+    description="Lista usuarios con filtros por rol, sede y estado. Administrador puede ver cualquier usuario; asesoria solo tecnicos activos para asignacion de OT.",
 )
 async def get_users(
     rol: UserRole | None = Query(default=None),
     sede_id: UUID | None = Query(default=None),
     estado: UserStatus | None = Query(default=None),
-    current_user: CurrentUser = Depends(require_role(UserRole.administrador)),
+    current_user: CurrentUser = Depends(get_current_user),
 ):
-    return await list_users(current_user.supabase, rol=rol, sede_id=sede_id, estado=estado)
+    if current_user.role == UserRole.administrador:
+        client = await _catalog_client_for_user(current_user)
+        return await list_users(client, rol=rol, sede_id=sede_id, estado=estado)
+
+    if current_user.role == UserRole.asesor_servicio:
+        if rol != UserRole.tecnico or estado != UserStatus.activo:
+            return []
+        client = await _catalog_client_for_user(current_user)
+        return await list_users(client, rol=rol, sede_id=sede_id, estado=estado)
+
+    return []
 
 
 @router.post(
@@ -54,10 +72,13 @@ async def post_user(
     "/sedes",
     response_model=list[SedeRead],
     summary="Listar sedes",
-    description="Lista todas las sedes activas e inactivas. Solo administrador.",
+    description="Lista sedes visibles para la operacion. Administrador y asesoria pueden consultarlas.",
 )
-async def get_sedes(current_user: CurrentUser = Depends(require_role(UserRole.administrador))):
-    return await list_sedes(current_user.supabase)
+async def get_sedes(current_user: CurrentUser = Depends(get_current_user)):
+    if current_user.role not in {UserRole.administrador, UserRole.asesor_servicio}:
+        return []
+    client = await _catalog_client_for_user(current_user)
+    return await list_sedes(client)
 
 
 @router.post(

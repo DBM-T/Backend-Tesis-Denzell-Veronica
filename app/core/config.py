@@ -36,6 +36,8 @@ class Settings(BaseSettings):
         alias="OC_LIMITE_APROBACION_GERENCIA",
     )
     ml_models_dir: Path = Field(default=Path("app/ml/models"), alias="ML_MODELS_DIR")
+    ml_priority_high_threshold: float = Field(default=0.90, alias="ML_PRIORITY_HIGH_THRESHOLD")
+    ml_priority_low_threshold: float = Field(default=0.10, alias="ML_PRIORITY_LOW_THRESHOLD")
     reports_bucket: str = Field(default="reports", alias="REPORTS_BUCKET")
     auth_rate_limit_per_minute: int = Field(default=5, alias="AUTH_RATE_LIMIT_PER_MINUTE")
     cors_origins_raw: str = Field(
@@ -55,6 +57,13 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [item.strip() for item in self.cors_origins_raw.split(",") if item.strip()]
+
+    @field_validator("ml_priority_high_threshold", "ml_priority_low_threshold")
+    @classmethod
+    def validate_probability_threshold(cls, value: float) -> float:
+        if not 0 <= value <= 1:
+            raise ValueError("Los thresholds de prioridad ML deben estar entre 0 y 1.")
+        return value
 
 
 @lru_cache

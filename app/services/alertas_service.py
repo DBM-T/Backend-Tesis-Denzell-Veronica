@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -8,9 +9,18 @@ from fastapi import HTTPException, status
 from supabase._async.client import AsyncClient
 
 from app.core.supabase_client import create_service_role_client
-from app.schemas.alertas import AlertaRead, DashboardIndicadorRead, DashboardRefreshResult, RecomendacionCompraRead
+from app.schemas.alertas import (
+    AlertaRead,
+    DashboardIndicadorRead,
+    DashboardRefreshResult,
+    DashboardWorkspaceRead,
+    RecomendacionCompraRead,
+)
 from app.schemas.auth import CurrentUser
 from app.schemas.enums import AlertSeverity, AlertStatus, AlertType, PurchaseOrderStatus, UserRole
+from app.services.health_service import build_health_response
+from app.services.ml_service import list_modelos_ml
+from app.services.operaciones_service import list_prs, list_work_orders
 
 
 def _utcnow() -> datetime:
@@ -41,6 +51,7 @@ async def list_alertas(
     severidad: AlertSeverity | None = None,
     tipo: AlertType | None = None,
     sede_id: str | None = None,
+    limit: int | None = None,
 ) -> list[AlertaRead]:
     query = client.table("alertas").select(
         "id,tipo,severidad,estado,repuesto_id,sede_id,orden_compra_id,proveedor_id,mensaje,atendido_por,atendido_en,created_at"
@@ -53,6 +64,8 @@ async def list_alertas(
         query = query.eq("tipo", tipo.value)
     if sede_id is not None:
         query = query.eq("sede_id", sede_id)
+    if limit is not None:
+        query = query.limit(limit)
     response = await query.execute()
     return [_to_alert(row) for row in response.data or []]
 
@@ -160,11 +173,18 @@ async def build_dashboard_snapshot(client: AsyncClient, *, sede_id: str | None =
         alerts_query = alerts_query.eq("sede_id", sede_id)
         demand_query = demand_query.eq("sede_id", sede_id)
 
-    inventory = (await inventory_query.execute()).data or []
-    params = (await params_query.execute()).data or []
-    orders = (await orders_query.execute()).data or []
-    alerts = (await alerts_query.execute()).data or []
-    demand = (await demand_query.execute()).data or []
+    inventory_response, params_response, orders_response, alerts_response, demand_response = await asyncio.gather(
+        inventory_query.execute(),
+        params_query.execute(),
+        orders_query.execute(),
+        alerts_query.execute(),
+        demand_query.execute(),
+    )
+    inventory = inventory_response.data or []
+    params = params_response.data or []
+    orders = orders_response.data or []
+    alerts = alerts_response.data or []
+    demand = demand_response.data or []
     params_map = {(row["repuesto_id"], row["sede_id"]): row for row in params}
     pr_ids = [row["pr_id"] for row in orders if row.get("pr_id")]
     pr_map: dict[str, str] = {}
@@ -210,6 +230,25 @@ async def build_dashboard_snapshot(client: AsyncClient, *, sede_id: str | None =
         alertas_activas_count=active_alerts,
         demanda_proyectada_total=demand_total,
         source="on_demand",
+    )
+
+
+async def build_dashboard_workspace(client: AsyncClient, *, sede_id: str | None = None) -> DashboardWorkspaceRead:
+    snapshot, alerts, work_orders, requisitions, models, health = await asyncio.gather(
+        build_dashboard_snapshot(client, sede_id=sede_id),
+        list_alertas(client, estado=AlertStatus.activa, sede_id=sede_id, limit=5),
+        list_work_orders(client, page=1, page_size=6, sede_id=sede_id),
+        list_prs(client, page=1, page_size=6, sede_id=sede_id),
+        list_modelos_ml(client, activo=True, limit=5),
+        build_health_response(verify_connection=False),
+    )
+    return DashboardWorkspaceRead(
+        snapshot=snapshot,
+        alerts=alerts,
+        work_orders=work_orders,
+        requisitions=requisitions.items,
+        models=models,
+        health=health,
     )
 
 

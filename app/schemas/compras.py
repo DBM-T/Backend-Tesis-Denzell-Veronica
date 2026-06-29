@@ -5,6 +5,8 @@ from uuid import UUID
 from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.enums import PurchaseChannel, PurchaseOrderStatus, RFQStatus
+from app.schemas.maestros import ProveedorRead
+from app.schemas.operaciones import PurchaseRequestRead
 
 
 class RFQCreate(BaseModel):
@@ -39,6 +41,8 @@ class RFQDetalleRead(BaseModel):
     rfq_id: UUID
     repuesto_id: UUID
     cantidad: int
+    codigo_sku: str | None = None
+    nombre_repuesto: str | None = None
 
 
 class RFQRespuestaCreateItem(BaseModel):
@@ -137,6 +141,8 @@ class OrdenCompraDetalleRead(BaseModel):
     repuesto_id: UUID
     cantidad: int
     precio_unitario: Decimal
+    codigo_sku: str | None = None
+    nombre_repuesto: str | None = None
 
 
 class OrdenCompraEstadoUpdate(BaseModel):
@@ -183,6 +189,14 @@ class RecepcionOCRead(BaseModel):
 class RecepcionOCCreateResponse(BaseModel):
     recepcion: RecepcionOCRead
     oc: OrdenCompraRead
+
+
+class ComprasWorkspaceRead(BaseModel):
+    requisiciones: list[PurchaseRequestRead] = Field(default_factory=list)
+    proveedores: list[ProveedorRead] = Field(default_factory=list)
+    rfqs: list[RFQRead] = Field(default_factory=list)
+    aprobaciones: list[AprobacionProveedorRead] = Field(default_factory=list)
+    ordenes_compra: list[OrdenCompraRead] = Field(default_factory=list)
 
 
 RFQRead.model_rebuild()

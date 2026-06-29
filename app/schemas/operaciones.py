@@ -12,6 +12,9 @@ from app.schemas.enums import (
     WorkOrderStatus,
 )
 from app.schemas.maestros import PaginatedResponse
+from app.schemas.maestros import RepuestoRead
+from app.schemas.sedes import SedeRead
+from app.schemas.usuarios import UsuarioRead
 
 
 class WorkOrderCreate(BaseModel):
@@ -31,6 +34,7 @@ class WorkOrderRead(WorkOrderCreate):
     codigo_ot: str
     asesor_id: UUID
     tecnico_id: UUID | None = None
+    tecnico_nombre: str | None = None
     estado: WorkOrderStatus
     prioridad_ml: PriorityML | None = None
     confianza_ml: float | None = Field(default=None, ge=0, le=1)
@@ -151,7 +155,7 @@ class InventoryMovementRead(BaseModel):
     repuesto_id: UUID
     sede_id: UUID
     tipo: InventoryMoveType
-    cantidad: int
+    cantidad: Decimal
     ot_id: UUID | None = None
     orden_compra_id: UUID | None = None
     motivo: str | None = None
@@ -182,7 +186,7 @@ class OrdenVentaDetalleRead(BaseModel):
     repuesto_id: UUID
     codigo_sku: str
     nombre_repuesto: str
-    cantidad: int
+    cantidad: Decimal
     precio_unitario: Decimal
     subtotal: Decimal
     created_at: datetime
@@ -219,6 +223,13 @@ class CancelOrdenVentaResponse(BaseModel):
 
 class WorkOrderListRead(WorkOrderRead):
     orden_venta: OrdenVentaRead | None = None
+
+
+class OTWorkspaceRead(BaseModel):
+    work_orders: list[WorkOrderListRead]
+    sedes: list[SedeRead]
+    technicians: list[UsuarioRead]
+    active_parts: list[RepuestoRead]
 
 
 PaginatedPurchaseRequestResponse = PaginatedResponse[PurchaseRequestRead]

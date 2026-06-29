@@ -15,6 +15,7 @@ from app.schemas.operaciones import (
     DiagnosticRequest,
     InventoryMovementCreate,
     InventoryMovementRead,
+    OTWorkspaceRead,
     PaginatedInventoryMovementResponse,
     PaginatedPurchaseRequestResponse,
     PriorityClassificationRequest,
@@ -37,6 +38,7 @@ from app.services.operaciones_service import (
     create_inventory_movement,
     create_manual_pr,
     create_work_order,
+    get_ot_workspace,
     list_inventory_movements,
     list_prs,
     list_work_orders,
@@ -62,6 +64,15 @@ async def get_ot(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     return await list_work_orders(current_user.supabase, page=page, page_size=page_size)
+
+
+@router.get("/ot/workspace", response_model=OTWorkspaceRead, summary="Workspace OT")
+async def get_ot_workspace_endpoint(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return await get_ot_workspace(current_user.supabase, current_user, page=page, page_size=page_size)
 
 
 @router.put("/ot/{ot_id}/asignar-tecnico", response_model=WorkOrderRead, summary="Asignar tecnico")

@@ -7,6 +7,9 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from app.schemas.enums import AlertSeverity, AlertStatus, AlertType
+from app.schemas.health import HealthResponse
+from app.schemas.ml import ModeloMLRead
+from app.schemas.operaciones import PurchaseRequestRead, WorkOrderListRead
 
 
 class AlertaRead(BaseModel):
@@ -52,3 +55,12 @@ class DashboardRefreshResult(BaseModel):
     alertas_creadas: int
     recomendaciones_creadas: int
     dashboard_actualizado: int
+
+
+class DashboardWorkspaceRead(BaseModel):
+    snapshot: DashboardIndicadorRead
+    alerts: list[AlertaRead]
+    work_orders: list[WorkOrderListRead]
+    requisitions: list[PurchaseRequestRead]
+    models: list[ModeloMLRead]
+    health: HealthResponse

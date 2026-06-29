@@ -3,13 +3,20 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.core.security import get_current_user
-from app.schemas.alertas import AlertaRead, DashboardIndicadorRead, DashboardRefreshResult, RecomendacionCompraRead
+from app.schemas.alertas import (
+    AlertaRead,
+    DashboardIndicadorRead,
+    DashboardRefreshResult,
+    DashboardWorkspaceRead,
+    RecomendacionCompraRead,
+)
 from app.schemas.auth import CurrentUser
 from app.schemas.enums import AlertSeverity, AlertStatus, AlertType
 from app.services.alertas_service import (
     attend_alert,
     attend_recommendation,
     build_dashboard_snapshot,
+    build_dashboard_workspace,
     list_alertas,
     list_recomendaciones,
     refresh_alerts_and_dashboard,
@@ -80,6 +87,21 @@ async def put_recomendacion_atender(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     return await attend_recommendation(current_user.supabase, current_user, str(recommendation_id))
+
+
+@router.get(
+    "/dashboard/workspace",
+    response_model=DashboardWorkspaceRead,
+    summary="Workspace del dashboard",
+    description="Devuelve en una sola respuesta el snapshot, alertas, OTs, requisiciones, modelos y estado del backend.",
+)
+async def get_dashboard_workspace(
+    sede_id: UUID | None = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    if current_user.role not in {"administrador", "logistica", "gerencia"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permisos para consultar el dashboard.")
+    return await build_dashboard_workspace(current_user.supabase, sede_id=str(sede_id) if sede_id else None)
 
 
 @router.get(

@@ -4,6 +4,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from postgrest.exceptions import APIError
 from supabase._async.client import AsyncClient
+from supabase_auth.errors import AuthApiError
 
 from app.core.supabase_client import create_request_client
 from app.schemas.auth import CurrentUser
@@ -26,7 +27,16 @@ async def get_current_user(
 
     access_token = credentials.credentials
     client = await create_request_client(access_token)
-    auth_response = await client.auth.get_user(access_token)
+    try:
+        auth_response = await client.auth.get_user(access_token)
+    except AuthApiError as exc:
+        message = "La sesion ha expirado. Inicia sesion nuevamente."
+        if "expired" not in str(exc).lower():
+            message = "No se pudo validar el token de acceso."
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=message,
+        ) from exc
 
     if auth_response is None or auth_response.user is None:
         raise HTTPException(

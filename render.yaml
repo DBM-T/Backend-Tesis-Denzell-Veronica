@@ -1,11 +1,37 @@
 services:
   - type: web
-    name: caleand-backend
+    name: motrix-api
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
-      - key: PORT
-        value: 8000
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: ENVIRONMENT
+        value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWKS_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: OC_LIMITE_APROBACION_GERENCIA
+        value: 1500.00
+      - key: ML_MODELS_DIR
+        value: app/ml/models
+      - key: ML_PRIORITY_HIGH_THRESHOLD
+        value: 0.90
+      - key: ML_PRIORITY_LOW_THRESHOLD
+        value: 0.10
+      - key: REPORTS_BUCKET
+        value: reports
+      - key: AUTH_RATE_LIMIT_PER_MINUTE
+        value: 5
+      - key: CORS_ORIGINS
+        sync: false

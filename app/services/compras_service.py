@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -8,11 +10,14 @@ from fastapi import HTTPException, status
 from supabase._async.client import AsyncClient
 
 from app.ml.inference.ranking_service import generate_ranking_for_rfq
+from app.services.maestros_service import list_proveedores
+from app.services.operaciones_service import list_prs
 from app.services.alertas_service import create_alerta_from_recepcion
 from app.schemas.auth import CurrentUser
 from app.schemas.compras import (
     AprobacionProveedorCreate,
     AprobacionProveedorRead,
+    ComprasWorkspaceRead,
     OrdenCompraCreate,
     OrdenCompraDetalleRead,
     OrdenCompraEstadoUpdate,
@@ -29,6 +34,9 @@ from app.schemas.compras import (
     RankingProveedorRead,
 )
 from app.schemas.enums import AlertSeverity, AlertType, PurchaseOrderStatus, PurchaseRequestStatus, RFQStatus, UserRole
+
+
+logger = logging.getLogger("caleand")
 
 
 def _utcnow() -> datetime:
@@ -56,6 +64,72 @@ def _oc_read(row: dict, detalle: list[OrdenCompraDetalleRead] | None = None) -> 
     return OrdenCompraRead.model_validate(payload)
 
 
+def _group_rows_by(rows: list, key_getter) -> dict[str, list]:
+    grouped: dict[str, list] = {}
+    for row in rows:
+        key = str(key_getter(row))
+        grouped.setdefault(key, []).append(row)
+    return grouped
+
+
+async def _enrich_rfq_details(client: AsyncClient, detail_rows: list[dict]) -> list[RFQDetalleRead]:
+    if not detail_rows:
+        return []
+    repuesto_ids = sorted({row["repuesto_id"] for row in detail_rows if row.get("repuesto_id")})
+    repuestos_response = await client.table("repuestos").select("id,codigo_sku,nombre").in_("id", repuesto_ids).execute()
+    repuestos_map = {row["id"]: row for row in repuestos_response.data or []}
+    enriched: list[RFQDetalleRead] = []
+    for row in detail_rows:
+        repuesto = repuestos_map.get(row.get("repuesto_id"), {})
+        enriched.append(
+            RFQDetalleRead.model_validate(
+                {
+                    **row,
+                    "codigo_sku": repuesto.get("codigo_sku"),
+                    "nombre_repuesto": repuesto.get("nombre"),
+                }
+            )
+        )
+    return enriched
+
+
+async def _enrich_oc_details(client: AsyncClient, detail_rows: list[dict]) -> list[OrdenCompraDetalleRead]:
+    if not detail_rows:
+        return []
+    repuesto_ids = sorted({row["repuesto_id"] for row in detail_rows if row.get("repuesto_id")})
+    repuestos_response = await client.table("repuestos").select("id,codigo_sku,nombre").in_("id", repuesto_ids).execute()
+    repuestos_map = {row["id"]: row for row in repuestos_response.data or []}
+    enriched: list[OrdenCompraDetalleRead] = []
+    for row in detail_rows:
+        repuesto = repuestos_map.get(row.get("repuesto_id"), {})
+        enriched.append(
+            OrdenCompraDetalleRead.model_validate(
+                {
+                    **row,
+                    "codigo_sku": repuesto.get("codigo_sku"),
+                    "nombre_repuesto": repuesto.get("nombre"),
+                }
+            )
+        )
+    return enriched
+
+
+async def _fetch_rfq_detail_map(client: AsyncClient, rfq_ids: list[str]) -> dict[str, list[RFQDetalleRead]]:
+    if not rfq_ids:
+        return {}
+    details = await client.table("rfq_detalle").select("id,rfq_id,repuesto_id,cantidad").in_("rfq_id", rfq_ids).execute()
+    enriched = await _enrich_rfq_details(client, details.data or [])
+    return _group_rows_by(enriched, lambda item: item.rfq_id)
+
+
+async def _fetch_oc_detail_map(client: AsyncClient, oc_ids: list[str]) -> dict[str, list[OrdenCompraDetalleRead]]:
+    if not oc_ids:
+        return {}
+    details = await client.table("oc_detalle").select("id,oc_id,repuesto_id,cantidad,precio_unitario").in_("oc_id", oc_ids).execute()
+    enriched = await _enrich_oc_details(client, details.data or [])
+    return _group_rows_by(enriched, lambda item: item.oc_id)
+
+
 async def _fetch_pr(client: AsyncClient, pr_id: str) -> dict:
     response = await client.table("requisiciones_compra").select(
         "id,codigo_pr,ot_id,sede_id,prioridad_heredada,estado,generado_automaticamente,creado_por,created_at,updated_at"
@@ -73,7 +147,7 @@ async def _fetch_rfq(client: AsyncClient, rfq_id: str) -> RFQRead:
     if not response.data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RFQ no encontrada.")
     details = await client.table("rfq_detalle").select("id,rfq_id,repuesto_id,cantidad").eq("rfq_id", rfq_id).execute()
-    return _rfq_read(response.data, [RFQDetalleRead.model_validate(row) for row in details.data or []])
+    return _rfq_read(response.data, await _enrich_rfq_details(client, details.data or []))
 
 
 async def _fetch_oc(client: AsyncClient, oc_id: str) -> OrdenCompraRead:
@@ -85,7 +159,7 @@ async def _fetch_oc(client: AsyncClient, oc_id: str) -> OrdenCompraRead:
     if not response.data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OC no encontrada.")
     details = await client.table("oc_detalle").select("id,oc_id,repuesto_id,cantidad,precio_unitario").eq("oc_id", oc_id).execute()
-    return _oc_read(response.data, [OrdenCompraDetalleRead.model_validate(row) for row in details.data or []])
+    return _oc_read(response.data, await _enrich_oc_details(client, details.data or []))
 
 
 async def list_rfqs(client: AsyncClient, *, page: int, page_size: int) -> list[RFQRead]:
@@ -94,11 +168,9 @@ async def list_rfqs(client: AsyncClient, *, page: int, page_size: int) -> list[R
         "id,codigo_rfq,pr_id,proveedor_id,fecha_limite_respuesta,condiciones_comerciales,estado,"
         "enviado_automaticamente,creado_por,created_at"
     ).order("created_at", desc=True).range(start, start + page_size - 1).execute()
-    result: list[RFQRead] = []
-    for row in response.data or []:
-        details = await client.table("rfq_detalle").select("id,rfq_id,repuesto_id,cantidad").eq("rfq_id", row["id"]).execute()
-        result.append(_rfq_read(row, [RFQDetalleRead.model_validate(item) for item in details.data or []]))
-    return result
+    rows = response.data or []
+    detail_map = await _fetch_rfq_detail_map(client, [str(row["id"]) for row in rows])
+    return [_rfq_read(row, detail_map.get(str(row["id"]), [])) for row in rows]
 
 
 async def list_aprobaciones_proveedor(client: AsyncClient, *, page: int, page_size: int) -> list[AprobacionProveedorRead]:
@@ -116,11 +188,26 @@ async def list_ordenes_compra(client: AsyncClient, *, page: int, page_size: int)
         "canal_compra,estado,requiere_aprobacion_gerencia,aprobado_por_gerencia_id,fecha_aprobacion_gerencia,"
         "creado_por,created_at,updated_at"
     ).order("created_at", desc=True).range(start, start + page_size - 1).execute()
-    result: list[OrdenCompraRead] = []
-    for row in response.data or []:
-        details = await client.table("oc_detalle").select("id,oc_id,repuesto_id,cantidad,precio_unitario").eq("oc_id", row["id"]).execute()
-        result.append(_oc_read(row, [OrdenCompraDetalleRead.model_validate(item) for item in details.data or []]))
-    return result
+    rows = response.data or []
+    detail_map = await _fetch_oc_detail_map(client, [str(row["id"]) for row in rows])
+    return [_oc_read(row, detail_map.get(str(row["id"]), [])) for row in rows]
+
+
+async def get_compras_workspace(client: AsyncClient, *, page_size: int = 100) -> ComprasWorkspaceRead:
+    requisiciones, proveedores, rfqs, aprobaciones, ordenes_compra = await asyncio.gather(
+        list_prs(client, page=1, page_size=page_size),
+        list_proveedores(client, page=1, page_size=page_size),
+        list_rfqs(client, page=1, page_size=page_size),
+        list_aprobaciones_proveedor(client, page=1, page_size=page_size),
+        list_ordenes_compra(client, page=1, page_size=page_size),
+    )
+    return ComprasWorkspaceRead(
+        requisiciones=requisiciones.items,
+        proveedores=proveedores.items,
+        rfqs=rfqs,
+        aprobaciones=aprobaciones,
+        ordenes_compra=ordenes_compra,
+    )
 
 
 async def _get_rfq_detail_map(client: AsyncClient, rfq_id: str) -> dict[str, dict]:
@@ -210,29 +297,38 @@ async def update_rfq_status(client: AsyncClient, current_user: CurrentUser, rfq_
 
 
 async def get_rfq_ranking(client: AsyncClient, rfq_id: str) -> list[RankingProveedorRead]:
-    rows = await client.table("ranking_proveedores_ml").select(
-        "id,rfq_id,proveedor_id,repuesto_id,score_total_ml,ranking_posicion,canal_sugerido_ml,version_modelo,created_at"
-    ).eq("rfq_id", rfq_id).order("ranking_posicion", desc=False).execute()
-    if not rows.data:
-        generated = await generate_ranking_for_rfq(client, rfq_id)
-        if generated:
-            rows = await client.table("ranking_proveedores_ml").select(
-                "id,rfq_id,proveedor_id,repuesto_id,score_total_ml,ranking_posicion,canal_sugerido_ml,version_modelo,created_at"
-            ).eq("rfq_id", rfq_id).order("ranking_posicion", desc=False).execute()
+    try:
+        rows = await client.table("ranking_proveedores_ml").select(
+            "id,rfq_id,proveedor_id,repuesto_id,score_total_ml,ranking_posicion,canal_sugerido_ml,version_modelo,created_at"
+        ).eq("rfq_id", rfq_id).order("ranking_posicion", desc=False).execute()
+        if not rows.data:
+            generated = await generate_ranking_for_rfq(client, rfq_id)
+            if generated:
+                rows = await client.table("ranking_proveedores_ml").select(
+                    "id,rfq_id,proveedor_id,repuesto_id,score_total_ml,ranking_posicion,canal_sugerido_ml,version_modelo,created_at"
+                ).eq("rfq_id", rfq_id).order("ranking_posicion", desc=False).execute()
+    except Exception:
+        logger.warning("No se pudo obtener/generar ranking para RFQ %s. Se continuara sin ranking.", rfq_id, exc_info=True)
+        return []
+
     enriched: list[RankingProveedorRead] = []
-    if rows.data:
-        provider_rows = await client.table("proveedores").select("id,razon_social").execute()
-        provider_map = {row["id"]: row for row in provider_rows.data or []}
-        repuestos_rows = await client.table("repuestos").select("id,codigo_sku").execute()
-        repuesto_map = {row["id"]: row for row in repuestos_rows.data or []}
-        for row in rows.data:
-            enriched.append(
-                RankingProveedorRead(
-                    **row,
-                    proveedor_razon_social=provider_map.get(row["proveedor_id"], {}).get("razon_social"),
-                    repuesto_codigo_sku=repuesto_map.get(row["repuesto_id"], {}).get("codigo_sku"),
+    try:
+        if rows.data:
+            provider_rows = await client.table("proveedores").select("id,razon_social").execute()
+            provider_map = {row["id"]: row for row in provider_rows.data or []}
+            repuestos_rows = await client.table("repuestos").select("id,codigo_sku").execute()
+            repuesto_map = {row["id"]: row for row in repuestos_rows.data or []}
+            for row in rows.data:
+                enriched.append(
+                    RankingProveedorRead(
+                        **row,
+                        proveedor_razon_social=provider_map.get(row["proveedor_id"], {}).get("razon_social"),
+                        repuesto_codigo_sku=repuesto_map.get(row["repuesto_id"], {}).get("codigo_sku"),
+                    )
                 )
-            )
+    except Exception:
+        logger.warning("No se pudo enriquecer ranking para RFQ %s. Se devolvera ranking vacio.", rfq_id, exc_info=True)
+        return []
     return enriched
 
 
@@ -242,15 +338,19 @@ async def create_aprobacion_proveedor(
     _require_roles(current_user, UserRole.logistica, UserRole.administrador)
     ranking = await get_rfq_ranking(client, str(payload.rfq_id))
     recommended_provider_id = ranking[0].proveedor_id if ranking else None
-    coincide = recommended_provider_id == payload.proveedor_seleccionado_id
-    if not coincide and not payload.justificacion:
+    coincide = recommended_provider_id == payload.proveedor_seleccionado_id if recommended_provider_id else False
+    justificacion = payload.justificacion
+    # Si no hay ranking disponible, la aprobacion manual no debe bloquear el flujo.
+    if recommended_provider_id is None and not justificacion:
+        justificacion = "Aprobacion manual registrada porque no hubo ranking disponible para esta RFQ."
+    if recommended_provider_id is not None and not coincide and not justificacion:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La justificacion es obligatoria si el proveedor no coincide con el ranking.")
     response = await client.table("aprobaciones_proveedor").insert(
         {
             "rfq_id": str(payload.rfq_id),
             "proveedor_seleccionado_id": str(payload.proveedor_seleccionado_id),
             "coincide_con_recomendacion_ml": coincide,
-            "justificacion": payload.justificacion,
+            "justificacion": justificacion,
             "aprobado_por": str(current_user.id),
         }
     ).execute()
@@ -361,7 +461,10 @@ async def create_recepcion_oc(
     current = await _fetch_oc(client, oc_id)
     if current.estado not in {PurchaseOrderStatus.aprobada, PurchaseOrderStatus.enviada, PurchaseOrderStatus.pendiente, PurchaseOrderStatus.recibida_parcial}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La OC no permite recepciones en este estado.")
-    pr_response = await client.table("requisiciones_compra").select("sede_id").eq("id", str(current.pr_id)).single().execute()
+    pr_sede_id: str | None = None
+    if current.pr_id:
+        pr_response = await client.table("requisiciones_compra").select("sede_id").eq("id", str(current.pr_id)).single().execute()
+        pr_sede_id = str(pr_response.data["sede_id"]) if pr_response.data and pr_response.data.get("sede_id") else None
     recepcion_response = await client.table("recepciones_oc").insert(
         {"oc_id": oc_id, "recibido_por": str(current_user.id)}
     ).execute()
@@ -391,7 +494,7 @@ async def create_recepcion_oc(
                     severidad=AlertSeverity.alta,
                     mensaje="Se registró una no conformidad en la recepción de OC.",
                     repuesto_id=str(item.repuesto_id),
-                    sede_id=str(pr_response.data["sede_id"]) if pr_response.data else None,
+                    sede_id=pr_sede_id,
                 )
 
     response = await client.table("recepciones_oc").select("id,oc_id,fecha_recepcion,recibido_por,created_at").eq("id", recepcion_id).single().execute()

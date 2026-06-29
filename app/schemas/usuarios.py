@@ -35,8 +35,13 @@ class UsuarioUpdate(BaseModel):
     estado: UserStatus | None = None
 
 
-class UsuarioRead(UsuarioBase):
+class UsuarioRead(BaseModel):
     id: UUID
+    nombres: str = Field(min_length=1, max_length=255)
+    apellidos: str = Field(min_length=1, max_length=255)
+    email: str
+    telefono: str | None = None
+    sede_id: UUID | None = None
     rol: UserRole
     estado: UserStatus
     created_at: datetime

@@ -290,6 +290,7 @@ async def list_modelos_ml(
     *,
     tipo_modelo: MLModelType | None = None,
     activo: bool | None = None,
+    limit: int | None = None,
 ) -> list[ModeloMLRead]:
     query = client.table("modelos_ml").select(
         "id,tipo_modelo,version,descripcion,activo,entrenado_en,aprobado_por,created_at"
@@ -298,6 +299,8 @@ async def list_modelos_ml(
         query = query.eq("tipo_modelo", tipo_modelo.value)
     if activo is not None:
         query = query.eq("activo", activo)
+    if limit is not None:
+        query = query.limit(limit)
     response = await query.execute()
     return [ModeloMLRead.model_validate(row) for row in response.data or []]
 

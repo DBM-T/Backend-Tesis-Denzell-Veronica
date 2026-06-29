@@ -7,6 +7,7 @@ from app.schemas.auth import CurrentUser
 from app.schemas.compras import (
     AprobacionProveedorCreate,
     AprobacionProveedorRead,
+    ComprasWorkspaceRead,
     OrdenCompraCreate,
     OrdenCompraEstadoUpdate,
     OrdenCompraRead,
@@ -26,6 +27,7 @@ from app.services.compras_service import (
     create_orden_compra,
     create_rfq,
     create_recepcion_oc,
+    get_compras_workspace,
     get_rfq_ranking,
     list_aprobaciones_proveedor,
     list_ordenes_compra,
@@ -38,6 +40,14 @@ from app.services.compras_service import (
 
 
 router = APIRouter()
+
+
+@router.get("/compras/workspace", response_model=ComprasWorkspaceRead, summary="Workspace de compras")
+async def get_workspace_compras(
+    page_size: int = 100,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return await get_compras_workspace(current_user.supabase, page_size=page_size)
 
 
 @router.get("/rfq", response_model=list[RFQRead], summary="Listar RFQ")

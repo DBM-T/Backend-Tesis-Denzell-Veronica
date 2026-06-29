@@ -6,7 +6,7 @@ from fastapi import HTTPException, status
 from supabase._async.client import AsyncClient
 
 from app.schemas.auth import CurrentUser
-from app.schemas.enums import OrdenVentaStatus, UserRole
+from app.schemas.enums import OrdenVentaStatus, PriorityML, UserRole
 from app.schemas.operaciones import OrdenVentaDetalleRead, OrdenVentaRead, WorkOrderListRead
 
 
@@ -140,21 +140,25 @@ async def cancel_sale(client: AsyncClient, current_user: CurrentUser, ov_id: str
     return await _fetch_sale(client, ov_id)
 
 
-async def list_work_orders(client: AsyncClient, *, page: int, page_size: int) -> list[WorkOrderListRead]:
+async def list_work_orders(
+    client: AsyncClient,
+    *,
+    page: int,
+    page_size: int,
+    sede_id: str | None = None,
+) -> list[WorkOrderListRead]:
     start = max(page - 1, 0) * page_size
-    response = await (
-        client.table("ordenes_trabajo")
-        .select(
-            "id,codigo_ot,cliente_nombre,cliente_documento,cliente_telefono,vehiculo_placa,"
-            "vehiculo_marca,vehiculo_modelo,vehiculo_anio,servicio_solicitado,asesor_id,tecnico_id,"
-            "sede_id,estado,prioridad_ml,confianza_ml,fecha_diagnostico,fecha_completado,created_at,updated_at"
-        )
-        .order("created_at", desc=True)
-        .range(start, start + page_size - 1)
-        .execute()
+    query = client.table("ordenes_trabajo").select(
+        "id,codigo_ot,cliente_nombre,cliente_documento,cliente_telefono,vehiculo_placa,"
+        "vehiculo_marca,vehiculo_modelo,vehiculo_anio,servicio_solicitado,asesor_id,tecnico_id,"
+        "sede_id,estado,prioridad_ml,confianza_ml,fecha_diagnostico,fecha_completado,created_at,updated_at"
     )
+    if sede_id is not None:
+        query = query.eq("sede_id", sede_id)
+    response = await query.order("created_at", desc=True).range(start, start + page_size - 1).execute()
     sales_by_ot: dict[str, OrdenVentaRead] = {}
     work_order_ids = [row["id"] for row in response.data or []]
+    technician_names: dict[str, str] = {}
     if work_order_ids:
         sales_response = await (
             client.table("ordenes_venta")
@@ -168,10 +172,29 @@ async def list_work_orders(client: AsyncClient, *, page: int, page_size: int) ->
             detail = await _fetch_sale_detail(client, row["id"])
             sale = _sale_row(row, detail)
             sales_by_ot[str(sale.ot_id)] = sale
+
+        technician_ids = sorted({str(row["tecnico_id"]) for row in response.data or [] if row.get("tecnico_id")})
+        if technician_ids:
+            try:
+                technicians_response = await (
+                    client.table("perfiles")
+                    .select("id,nombres,apellidos,email")
+                    .in_("id", technician_ids)
+                    .execute()
+                )
+                for technician in technicians_response.data or []:
+                    full_name = f"{technician.get('nombres') or ''} {technician.get('apellidos') or ''}".strip()
+                    technician_names[str(technician["id"])] = full_name or str(technician.get("email") or "")
+            except Exception:
+                technician_names = {}
     result: list[WorkOrderListRead] = []
     for row in response.data or []:
         payload = dict(row)
         sale = sales_by_ot.get(str(row["id"]))
         payload["orden_venta"] = sale.model_dump(mode="json") if sale else None
+        if row.get("tecnico_id"):
+            payload["tecnico_nombre"] = technician_names.get(str(row["tecnico_id"]))
+        if payload.get("prioridad_ml") is None and payload.get("confianza_ml") is not None:
+            payload["prioridad_ml"] = PriorityML.REVISAR.value
         result.append(WorkOrderListRead.model_validate(payload))
     return result

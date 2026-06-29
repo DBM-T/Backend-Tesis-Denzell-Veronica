@@ -28,6 +28,7 @@ class WorkOrderStatus(str, Enum):
 class PriorityML(str, Enum):
     ALTA = "ALTA"
     BAJA = "BAJA"
+    REVISAR = "REVISAR"
 
 
 class PurchaseRequestStatus(str, Enum):

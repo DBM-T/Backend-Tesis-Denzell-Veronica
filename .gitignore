@@ -8,7 +8,8 @@ GUIA_BACKEND.md
 # Ignorar carpetas de Node.js en cualquier nivel del proyecto
 **/node_modules/
 node_modules/
-
+**/test/
+test/
 # Ignorar caché de Python en cualquier nivel del proyecto
 **/__pycache__/
 __pycache__/
@@ -39,8 +40,13 @@ test_db.py
 *.temp
 *.tmp
 *.log
+temp/
+tmp/
+**/temp/
+**/tmp/
+.ruff_cache/
+**/.ruff_cache/
 
 # OS
 .DS_Store
 Thumbs.db
-
