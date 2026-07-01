@@ -100,3 +100,23 @@ class RecalcularDemandaResponse(BaseModel):
     periodo_inicio: date | None = None
     periodo_fin: date | None = None
     source: str | None = None
+
+
+class ModeloMetricasMLRead(BaseModel):
+    id: UUID
+    tipo_modelo: MLModelType
+    version: str
+    activo: bool
+    problem_type: Literal["regression", "classification"]
+    source: str
+    description: str | None = None
+    mape: float | None = None
+    rmse: float | None = None
+    r2: float | None = None
+    mae: float | None = None
+    accuracy: float | None = None
+    f1_macro: float | None = None
+    f1_alta: float | None = None
+    f1_baja: float | None = None
+    note: str | None = None
+    metricas_originales: dict[str, object] = Field(default_factory=dict)

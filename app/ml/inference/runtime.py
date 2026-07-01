@@ -326,8 +326,7 @@ def predecir_demanda(features: DemandaFeatures) -> DemandaResult:
                 features.lead_time_base_dias or 0,
             ]]
             if hasattr(model.artifact, "predict"):
-                raw_prediction = float(model.artifact.predict(payload)[0])
-                prediction = max(expm1(raw_prediction), 0.0)
+                prediction = max(float(model.artifact.predict(payload)[0]), 0.0)
                 lead = max(1.0, features.lead_time_base_dias or 7.0)
                 stock_actual = max(features.stock_actual or 0, 0)
                 stock_minimo = max(features.stock_minimo or 0, 0)
@@ -348,7 +347,7 @@ def predecir_demanda(features: DemandaFeatures) -> DemandaResult:
                     confidence,
                     model.model_id,
                     model.version,
-                    "xgboost_log1p",
+                    "xgboost_tweedie_raw",
                 )
         except Exception:
             pass

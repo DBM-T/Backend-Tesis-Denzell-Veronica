@@ -1,0 +1,151 @@
+{
+  "dataset_path": "DATASETSmejorados\\dataset_lead_time_compras_sintetico.csv",
+  "model_path": "ml\\models\\xgboost_lead_time\\v1\\model.joblib",
+  "feature_columns_order": [
+    "lead_time_estimado_dias",
+    "monto_total",
+    "cantidad_lineas",
+    "cantidad_total_unidades",
+    "mes_pedido"
+  ],
+  "target_column": "lead_time_real_dias",
+  "split": {
+    "strategy": "temporal_by_compra_id_last_20pct_as_test",
+    "train_rows": 4800,
+    "test_rows": 1200,
+    "train_compra_id_min": 1,
+    "train_compra_id_max": 4800,
+    "test_compra_id_min": 4801,
+    "test_compra_id_max": 6000
+  },
+  "target_audit": {
+    "rows": 6000,
+    "min": 1.2,
+    "max": 26.44,
+    "mean": 7.2268,
+    "median": 6.79,
+    "std": 3.3041,
+    "provider_unique_count": 150,
+    "lead_time_estimado_es_inferido_true_pct": 15.4667,
+    "frequency_by_integer_value": {
+      "1": 51,
+      "2": 255,
+      "3": 582,
+      "4": 760,
+      "5": 770,
+      "6": 744,
+      "7": 782,
+      "8": 644,
+      "9": 402,
+      "10": 304,
+      "11": 193,
+      "12": 155,
+      "13": 102,
+      "14": 90,
+      "15": 49,
+      "16": 39,
+      "17": 17,
+      "18": 13,
+      "19": 21,
+      "20": 9,
+      "21": 7,
+      "22": 5,
+      "23": 4,
+      "24": 1,
+      "26": 1
+    },
+    "mode_share_pct": 0.25,
+    "is_almost_constant_over_80pct": false
+  },
+  "classification_variant_tested": false,
+  "classification_variant_reason": "No se probo clasificacion porque la desviacion estandar del target fue >= 2.0.",
+  "variants": [
+    {
+      "variant_name": "regresion_raw",
+      "target_transform": "none",
+      "best_params": {
+        "max_depth": 3,
+        "learning_rate": 0.02926900119346936,
+        "n_estimators": 396,
+        "subsample": 0.7687509758147958,
+        "colsample_bytree": 0.9298528902087922,
+        "min_child_weight": 2.8122725883059463
+      },
+      "cv_mae": 0.372,
+      "test_metrics": {
+        "mae": 0.32,
+        "rmse": 0.4658,
+        "mape": 4.765,
+        "r2": 0.9793,
+        "mae_inferido_false_only": 0.285,
+        "test_rows_inferido_false_only": 1021
+      },
+      "feature_importance": [
+        {
+          "feature": "lead_time_estimado_dias",
+          "importance": 0.865275
+        },
+        {
+          "feature": "cantidad_lineas",
+          "importance": 0.043907
+        },
+        {
+          "feature": "cantidad_total_unidades",
+          "importance": 0.037462
+        },
+        {
+          "feature": "monto_total",
+          "importance": 0.036102
+        },
+        {
+          "feature": "mes_pedido",
+          "importance": 0.017253
+        }
+      ]
+    },
+    {
+      "variant_name": "regresion_log1p",
+      "target_transform": "log1p",
+      "best_params": {
+        "max_depth": 2,
+        "learning_rate": 0.058357037277661894,
+        "n_estimators": 280,
+        "subsample": 0.6369286526334413,
+        "colsample_bytree": 0.7990676174866341,
+        "min_child_weight": 8.101389011542805
+      },
+      "cv_mae": 0.3638,
+      "test_metrics": {
+        "mae": 0.3095,
+        "rmse": 0.4641,
+        "mape": 4.489,
+        "r2": 0.9795,
+        "mae_inferido_false_only": 0.2752,
+        "test_rows_inferido_false_only": 1021
+      },
+      "feature_importance": [
+        {
+          "feature": "lead_time_estimado_dias",
+          "importance": 0.876775
+        },
+        {
+          "feature": "cantidad_total_unidades",
+          "importance": 0.042962
+        },
+        {
+          "feature": "cantidad_lineas",
+          "importance": 0.035738
+        },
+        {
+          "feature": "monto_total",
+          "importance": 0.029256
+        },
+        {
+          "feature": "mes_pedido",
+          "importance": 0.015269
+        }
+      ]
+    }
+  ],
+  "selected_final_variant": "regresion_log1p"
+}

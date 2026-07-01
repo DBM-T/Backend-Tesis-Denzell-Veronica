@@ -1,0 +1,89 @@
+{
+  "audit": {
+    "rows_total": 8000,
+    "proveedor_id_unicos": 8000,
+    "provider_rows_min": 1,
+    "provider_rows_max": 1,
+    "providers_with_single_row": 8000,
+    "score_min": -37.8125,
+    "score_max": 39.2422,
+    "score_mean": 21.08000775,
+    "score_median": 24.850749999999998,
+    "score_std_sample": 12.784259067304504,
+    "score_negative_rows": 1205,
+    "score_negative_pct": 15.0625,
+    "pct_tasa_defectos_es_inferida_true": 100.0,
+    "pct_tasa_entrega_es_inferida_true": 45.2875,
+    "pct_lead_time_es_inferido_true": 34.9,
+    "tasa_defectos_unique_values": [
+      5.0
+    ],
+    "tasa_defectos_unique_count": 1,
+    "pct_tasa_defectos_eq_5": 100.0
+  },
+  "training_result": {
+    "strategy": "A",
+    "strategy_reason": "Mas de 150 filas: corresponde split 80/20 estratificado por terciles y tuning con CV 5-fold. Dataset con mas de 150 filas. Se uso split 80/20 estratificado por terciles y tuning con CV 5-fold en train.",
+    "final_algorithm": "XGBoost",
+    "final_model_class": "XGBRegressor",
+    "best_params": {
+      "max_depth": 4,
+      "learning_rate": 0.049226872559432824,
+      "n_estimators": 521,
+      "subsample": 0.6193804709218084,
+      "colsample_bytree": 0.8307028371124743,
+      "min_child_weight": 1.1807627506519358,
+      "reg_alpha": 0.02211150426242656,
+      "reg_lambda": 3.440974767325467
+    },
+    "cv_metrics": {
+      "mae": 0.156158,
+      "rmse": 0.40576,
+      "mape": 3.252997,
+      "r2": 0.998996
+    },
+    "final_metrics": {
+      "mae": 0.163311,
+      "rmse": 0.494537,
+      "mape": 2.292934,
+      "r2": 0.998485
+    },
+    "feature_importance": [
+      {
+        "feature": "tasa_entrega_a_tiempo",
+        "importance": 0.80607921
+      },
+      {
+        "feature": "lead_time_estimado_dias",
+        "importance": 0.1695133
+      },
+      {
+        "feature": "precio_promedio",
+        "importance": 0.01988744
+      },
+      {
+        "feature": "volumen_compras_previas",
+        "importance": 0.00452003
+      },
+      {
+        "feature": "tasa_defectos",
+        "importance": 0.0
+      }
+    ],
+    "plot_path": "ml\\training\\reports\\xgboost_score_proveedor\\v1\\real_vs_pred.png",
+    "target_range_observed": {
+      "min": -37.8125,
+      "max": 39.2422
+    },
+    "prediction_range_reference": {
+      "mode": "held_out_test",
+      "pred_min": -36.110634,
+      "pred_max": 38.905037
+    },
+    "train_rows": 6400,
+    "test_rows": 1600,
+    "selected_model_note": "El artefacto final es el XGBRegressor ajustado con los mejores hiperparametros encontrados en train."
+  },
+  "dataset_path": "DATASETSmejorados\\dataset_score_proveedores_sintetico.csv",
+  "model_path": "ml\\models\\xgboost_score_proveedor\\v1\\model.joblib"
+}

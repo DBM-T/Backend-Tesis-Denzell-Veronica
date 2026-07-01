@@ -1,0 +1,172 @@
+{
+  "dataset_path": "DATASETSmejorados\\dataset_demanda_repuestos_catalogo_sintetico.csv",
+  "selected_final_version": "completo",
+  "mape_treatment": "El MAPE se calculo excluyendo filas con demanda_real_futura = 0 en el set de test porque dividir por cero lo vuelve infinito o enganoso. Ademas, cuando el target real es 1 o muy pequeno, errores absolutos modestos pueden inflar mucho el porcentaje. El reporte incluye cuantas filas con target 0 hubo en test.",
+  "versions": [
+    {
+      "version_name": "completo",
+      "rows_total": 11900,
+      "train_rows": 9350,
+      "test_rows": 2550,
+      "train_dates": [
+        "2024-04-01",
+        "2024-05-01",
+        "2024-06-01",
+        "2024-07-01",
+        "2024-08-01",
+        "2024-09-01",
+        "2024-10-01",
+        "2024-11-01",
+        "2024-12-01",
+        "2025-01-01",
+        "2025-02-01"
+      ],
+      "test_dates": [
+        "2025-03-01",
+        "2025-04-01",
+        "2025-05-01"
+      ],
+      "zero_target_rows_test": 0,
+      "flag_rates_train": {
+        "stock_actual_es_aproximado": 10.65,
+        "stock_minimo_es_inferido": 9.82,
+        "lead_time_es_inferido": 14.55,
+        "historial_insuficiente": 6.55
+      },
+      "best_params": {
+        "tweedie_variance_power": 1.2209245787909255,
+        "max_depth": 5,
+        "learning_rate": 0.03372905600896035,
+        "n_estimators": 250,
+        "subsample": 0.7921376273789545,
+        "colsample_bytree": 0.8478794177489314,
+        "min_child_weight": 3.63677984609597,
+        "reg_alpha": 0.48284864646139225,
+        "reg_lambda": 1.02783731240677
+      },
+      "cv_score": 6.5409,
+      "test_metrics": {
+        "mae": 1.7967,
+        "rmse": 2.6846,
+        "mape_pct_nonzero_only": 6.8186,
+        "smape_pct": 6.7808,
+        "wape_pct": 6.8132,
+        "r2": 0.9738
+      },
+      "feature_importance": [
+        {
+          "feature": "consumo_90d",
+          "importance": 0.663824
+        },
+        {
+          "feature": "promedio_consumo",
+          "importance": 0.320576
+        },
+        {
+          "feature": "tendencia",
+          "importance": 0.00803
+        },
+        {
+          "feature": "lead_time_base_dias",
+          "importance": 0.004225
+        },
+        {
+          "feature": "stock_minimo",
+          "importance": 0.001823
+        },
+        {
+          "feature": "stock_actual",
+          "importance": 0.001523
+        }
+      ],
+      "plot_path": "ml\\training\\reports\\xgboost_demanda\\v1\\real_vs_pred_completo.png"
+    },
+    {
+      "version_name": "solo_historial_suficiente",
+      "rows_total": 11221,
+      "train_rows": 8738,
+      "test_rows": 2483,
+      "train_dates": [
+        "2024-04-01",
+        "2024-05-01",
+        "2024-06-01",
+        "2024-07-01",
+        "2024-08-01",
+        "2024-09-01",
+        "2024-10-01",
+        "2024-11-01",
+        "2024-12-01",
+        "2025-01-01",
+        "2025-02-01"
+      ],
+      "test_dates": [
+        "2025-03-01",
+        "2025-04-01",
+        "2025-05-01"
+      ],
+      "zero_target_rows_test": 0,
+      "flag_rates_train": {
+        "stock_actual_es_aproximado": 10.71,
+        "stock_minimo_es_inferido": 9.82,
+        "lead_time_es_inferido": 14.53,
+        "historial_insuficiente": 0.0
+      },
+      "best_params": {
+        "tweedie_variance_power": 1.2369894380482673,
+        "max_depth": 5,
+        "learning_rate": 0.021842177671895398,
+        "n_estimators": 374,
+        "subsample": 0.7812958305066867,
+        "colsample_bytree": 0.8824015445845159,
+        "min_child_weight": 2.9126724140656393,
+        "reg_alpha": 0.8872127425763265,
+        "reg_lambda": 1.8388728353562886
+      },
+      "cv_score": 6.5947,
+      "test_metrics": {
+        "mae": 1.8054,
+        "rmse": 2.7063,
+        "mape_pct_nonzero_only": 6.8203,
+        "smape_pct": 6.7835,
+        "wape_pct": 6.8314,
+        "r2": 0.9735
+      },
+      "feature_importance": [
+        {
+          "feature": "consumo_90d",
+          "importance": 0.709958
+        },
+        {
+          "feature": "promedio_consumo",
+          "importance": 0.274447
+        },
+        {
+          "feature": "tendencia",
+          "importance": 0.007674
+        },
+        {
+          "feature": "lead_time_base_dias",
+          "importance": 0.003958
+        },
+        {
+          "feature": "stock_minimo",
+          "importance": 0.00229
+        },
+        {
+          "feature": "stock_actual",
+          "importance": 0.001673
+        }
+      ],
+      "plot_path": "ml\\training\\reports\\xgboost_demanda\\v1\\real_vs_pred_historial_suficiente.png"
+    }
+  ],
+  "feature_columns_order": [
+    "promedio_consumo",
+    "consumo_90d",
+    "tendencia",
+    "stock_actual",
+    "stock_minimo",
+    "lead_time_base_dias"
+  ],
+  "model_path": "ml\\models\\xgboost_demanda\\v1\\model.joblib"
+}

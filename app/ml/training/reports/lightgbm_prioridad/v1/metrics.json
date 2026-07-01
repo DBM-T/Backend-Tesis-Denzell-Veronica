@@ -1,0 +1,248 @@
+{
+  "best_params": {
+    "num_leaves": 39,
+    "max_depth": 4,
+    "learning_rate": 0.030808870190585605,
+    "n_estimators": 404,
+    "min_child_samples": 25,
+    "subsample": 0.9460792437281672,
+    "colsample_bytree": 0.8556159871417726,
+    "reg_alpha": 1.1582479985249268,
+    "reg_lambda": 2.860067437681606
+  },
+  "dataset_rows": 3500,
+  "cv_best_f1_macro": 0.9464,
+  "default_threshold": 0.5,
+  "selected_threshold": 0.56,
+  "threshold_selection_metric": "max cv_precision_alta with cv_recall_alta >= 0.90; tie-break by cv_f1_macro",
+  "threshold_cv_summary": {
+    "selection_rule": "max cv_precision_alta with cv_recall_alta >= 0.90; tie-break by cv_f1_macro",
+    "candidate_thresholds": [
+      {
+        "threshold": 0.35,
+        "cv_precision_alta": 0.9051,
+        "cv_recall_alta": 0.9298,
+        "cv_f1_macro": 0.9288
+      },
+      {
+        "threshold": 0.36,
+        "cv_precision_alta": 0.912,
+        "cv_recall_alta": 0.9298,
+        "cv_f1_macro": 0.932
+      },
+      {
+        "threshold": 0.37,
+        "cv_precision_alta": 0.9188,
+        "cv_recall_alta": 0.9281,
+        "cv_f1_macro": 0.9345
+      },
+      {
+        "threshold": 0.38,
+        "cv_precision_alta": 0.9243,
+        "cv_recall_alta": 0.9281,
+        "cv_f1_macro": 0.937
+      },
+      {
+        "threshold": 0.39,
+        "cv_precision_alta": 0.9252,
+        "cv_recall_alta": 0.9281,
+        "cv_f1_macro": 0.9374
+      },
+      {
+        "threshold": 0.4,
+        "cv_precision_alta": 0.926,
+        "cv_recall_alta": 0.9281,
+        "cv_f1_macro": 0.9377
+      },
+      {
+        "threshold": 0.41,
+        "cv_precision_alta": 0.9284,
+        "cv_recall_alta": 0.9281,
+        "cv_f1_macro": 0.9388
+      },
+      {
+        "threshold": 0.42,
+        "cv_precision_alta": 0.9315,
+        "cv_recall_alta": 0.9272,
+        "cv_f1_macro": 0.9399
+      },
+      {
+        "threshold": 0.43,
+        "cv_precision_alta": 0.9339,
+        "cv_recall_alta": 0.9272,
+        "cv_f1_macro": 0.941
+      },
+      {
+        "threshold": 0.44,
+        "cv_precision_alta": 0.9346,
+        "cv_recall_alta": 0.9272,
+        "cv_f1_macro": 0.9413
+      },
+      {
+        "threshold": 0.45,
+        "cv_precision_alta": 0.9403,
+        "cv_recall_alta": 0.9272,
+        "cv_f1_macro": 0.9438
+      },
+      {
+        "threshold": 0.46,
+        "cv_precision_alta": 0.9419,
+        "cv_recall_alta": 0.9272,
+        "cv_f1_macro": 0.9446
+      },
+      {
+        "threshold": 0.47,
+        "cv_precision_alta": 0.9445,
+        "cv_recall_alta": 0.9272,
+        "cv_f1_macro": 0.9457
+      },
+      {
+        "threshold": 0.48,
+        "cv_precision_alta": 0.9454,
+        "cv_recall_alta": 0.9272,
+        "cv_f1_macro": 0.946
+      },
+      {
+        "threshold": 0.49,
+        "cv_precision_alta": 0.947,
+        "cv_recall_alta": 0.9263,
+        "cv_f1_macro": 0.9464
+      },
+      {
+        "threshold": 0.5,
+        "cv_precision_alta": 0.947,
+        "cv_recall_alta": 0.9263,
+        "cv_f1_macro": 0.9464
+      },
+      {
+        "threshold": 0.51,
+        "cv_precision_alta": 0.9468,
+        "cv_recall_alta": 0.9237,
+        "cv_f1_macro": 0.9452
+      },
+      {
+        "threshold": 0.52,
+        "cv_precision_alta": 0.9468,
+        "cv_recall_alta": 0.9229,
+        "cv_f1_macro": 0.9449
+      },
+      {
+        "threshold": 0.53,
+        "cv_precision_alta": 0.9476,
+        "cv_recall_alta": 0.9229,
+        "cv_f1_macro": 0.9452
+      },
+      {
+        "threshold": 0.54,
+        "cv_precision_alta": 0.9476,
+        "cv_recall_alta": 0.9229,
+        "cv_f1_macro": 0.9452
+      },
+      {
+        "threshold": 0.55,
+        "cv_precision_alta": 0.9476,
+        "cv_recall_alta": 0.9229,
+        "cv_f1_macro": 0.9452
+      },
+      {
+        "threshold": 0.56,
+        "cv_precision_alta": 0.9484,
+        "cv_recall_alta": 0.922,
+        "cv_f1_macro": 0.9452
+      }
+    ],
+    "selected_row": {
+      "threshold": 0.56,
+      "cv_precision_alta": 0.9484,
+      "cv_recall_alta": 0.922,
+      "cv_f1_macro": 0.9452
+    }
+  },
+  "default_test_metrics": {
+    "accuracy": 0.9371,
+    "f1_macro": 0.9348,
+    "f1_baja": 0.9471,
+    "f1_alta": 0.9225,
+    "precision_baja": 0.9381,
+    "precision_alta": 0.9357,
+    "recall_baja": 0.9563,
+    "recall_alta": 0.9097,
+    "support_baja": 412,
+    "support_alta": 288,
+    "predicted_positive_mean": 0.4228
+  },
+  "selected_test_metrics": {
+    "accuracy": 0.9343,
+    "f1_macro": 0.9316,
+    "f1_baja": 0.9451,
+    "f1_alta": 0.9181,
+    "precision_baja": 0.9296,
+    "precision_alta": 0.9416,
+    "recall_baja": 0.9612,
+    "recall_alta": 0.8958,
+    "support_baja": 412,
+    "support_alta": 288,
+    "predicted_positive_mean": 0.4228
+  },
+  "default_confusion_matrix": {
+    "labels": [
+      "BAJA",
+      "ALTA"
+    ],
+    "matrix": [
+      [
+        394,
+        18
+      ],
+      [
+        26,
+        262
+      ]
+    ]
+  },
+  "selected_confusion_matrix": {
+    "labels": [
+      "BAJA",
+      "ALTA"
+    ],
+    "matrix": [
+      [
+        396,
+        16
+      ],
+      [
+        30,
+        258
+      ]
+    ]
+  },
+  "feature_importance": [
+    {
+      "feature": "historial_vehiculo",
+      "importance_gain": 18717.4375,
+      "importance_split": 899
+    },
+    {
+      "feature": "disponibilidad_tecnico",
+      "importance_gain": 15405.1783,
+      "importance_split": 1035
+    },
+    {
+      "feature": "tiempo_estimado_horas",
+      "importance_gain": 14229.021,
+      "importance_split": 2437
+    }
+  ],
+  "note_disponibilidad_tecnico": "disponibilidad_tecnico no quedo ultima en importance por gain, aunque su baja variabilidad sigue limitando su aporte potencial.",
+  "feature_columns_order": [
+    "historial_vehiculo",
+    "tiempo_estimado_horas",
+    "disponibilidad_tecnico"
+  ],
+  "target_mapping": {
+    "BAJA": 0,
+    "ALTA": 1
+  },
+  "dataset_path": "DATASETSmejorados\\dataset_prioridad_ot_sintetico.csv",
+  "model_path": "ml\\models\\lightgbm_prioridad\\v1\\model.joblib"
+}

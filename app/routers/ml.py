@@ -8,6 +8,7 @@ from app.schemas.enums import CSVDataType, MLModelType
 from app.schemas.ml import (
     CSVLoadResult,
     ModeloMLRead,
+    ModeloMetricasMLRead,
     PronosticoDemandaRead,
     RecalcularDemandaResponse,
     RiesgoAbastecimientoRead,
@@ -15,6 +16,7 @@ from app.schemas.ml import (
 )
 from app.services.ml_service import (
     get_csv_validations,
+    get_ml_metrics_dashboard,
     list_modelos_ml,
     list_pronosticos_demanda,
     list_riesgo_abastecimiento,
@@ -79,6 +81,16 @@ async def get_modelos_ml(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     return await list_modelos_ml(current_user.supabase, tipo_modelo=tipo_modelo, activo=activo)
+
+
+@router.get(
+    "/metricas-dashboard",
+    response_model=list[ModeloMetricasMLRead],
+    summary="Metricas consolidadas de modelos ML",
+    description="Devuelve las metricas finales por modelo activo, diferenciando regresion y clasificacion para el panel del administrador.",
+)
+async def get_metricas_dashboard(current_user: CurrentUser = Depends(get_current_user)):
+    return await get_ml_metrics_dashboard(current_user)
 
 
 @router.get(

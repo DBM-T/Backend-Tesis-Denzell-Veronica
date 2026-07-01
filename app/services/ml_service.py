@@ -3,10 +3,12 @@ from __future__ import annotations
 import csv
 import io
 import asyncio
+import json
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from fastapi import HTTPException, UploadFile, status
@@ -19,6 +21,7 @@ from app.schemas.ml import (
     CargaCSVRead,
     CSVLoadResult,
     ModeloMLRead,
+    ModeloMetricasMLRead,
     PronosticoDemandaRead,
     RecalcularDemandaResponse,
     RiesgoAbastecimientoRead,
@@ -29,6 +32,12 @@ from app.ml.inference.runtime import MODEL_CACHE, predecir_demanda
 
 
 REQUIRED_COLUMNS = {"repuesto_id", "sede_id", "cantidad_consumida", "fecha_consumo"}
+_REPORTS_DIR_CANDIDATES = [
+    Path(__file__).resolve().parents[1] / "app" / "ml" / "training" / "reports",
+    Path(__file__).resolve().parents[1] / "ml" / "training" / "reports",
+    Path(__file__).resolve().parents[2] / "ml" / "training" / "reports",
+    Path(__file__).resolve().parents[3] / "entrenamiento de ML" / "ml" / "training" / "reports",
+]
 
 
 @dataclass(slots=True)
@@ -40,6 +49,114 @@ class CsvValidationIssue:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _metric_value(payload: dict, *keys: str) -> float | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            return round(float(value), 4)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _select_selected_metrics(payload: dict) -> dict:
+    selected_final_version = payload.get("selected_final_version")
+    if selected_final_version and isinstance(payload.get("versions"), list):
+        for version in payload["versions"]:
+            if version.get("version_name") == selected_final_version:
+                return dict(version.get("test_metrics") or {})
+
+    selected_final_variant = payload.get("selected_final_variant")
+    if selected_final_variant and isinstance(payload.get("variants"), list):
+        for variant in payload["variants"]:
+            if variant.get("variant_name") == selected_final_variant:
+                return dict(variant.get("test_metrics") or {})
+
+    training_result = payload.get("training_result")
+    if isinstance(training_result, dict):
+        if isinstance(training_result.get("final_metrics"), dict):
+            return dict(training_result["final_metrics"])
+        if isinstance(training_result.get("test_metrics"), dict):
+            return dict(training_result["test_metrics"])
+
+    if isinstance(payload.get("selected_test_metrics"), dict):
+        return dict(payload["selected_test_metrics"])
+    if isinstance(payload.get("final_metrics"), dict):
+        return dict(payload["final_metrics"])
+    if isinstance(payload.get("test_metrics"), dict):
+        return dict(payload["test_metrics"])
+    return {}
+
+
+def _metrics_report_dirs(tipo_modelo: str) -> list[Path]:
+    aliases = [tipo_modelo]
+    if tipo_modelo == MLModelType.xgboost_proveedor.value:
+        aliases.insert(0, "xgboost_score_proveedor")
+    directories: list[Path] = []
+    for candidate_root in _REPORTS_DIR_CANDIDATES:
+        for alias in aliases:
+            directories.append(candidate_root / alias)
+    return directories
+
+
+def _report_path_for(tipo_modelo: str, version: str) -> Path | None:
+    for base_dir in _metrics_report_dirs(tipo_modelo):
+        candidate = base_dir / version / "metrics.json"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _build_ml_metric_row(modelo: ModeloMLRead) -> ModeloMetricasMLRead:
+    tipo_modelo = getattr(modelo.tipo_modelo, "value", str(modelo.tipo_modelo))
+    version = str(modelo.version)
+    report_path = _report_path_for(tipo_modelo, version)
+    metricas_originales: dict = {}
+    observacion: str | None = None
+
+    if report_path is not None:
+        try:
+            metricas_originales = json.loads(report_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            observacion = "El reporte JSON del modelo existe pero no se pudo leer correctamente."
+    else:
+        observacion = "No se encontro el reporte de entrenamiento asociado a este modelo activo."
+
+    metricas_seleccionadas = _select_selected_metrics(metricas_originales)
+    is_classification = tipo_modelo == MLModelType.lightgbm_prioridad.value
+
+    if is_classification:
+        observacion = observacion or "Modelo de clasificacion: Accuracy y F1 aplican; MAPE, RMSE, R² y MAE no aplican."
+    elif tipo_modelo == MLModelType.xgboost_proveedor.value:
+        observacion = observacion or "Modelo de score continuo con valores negativos posibles: MAE, RMSE y R² aplican; MAPE puede no ser representativo."
+    elif observacion is None:
+        missing = [name for name in ("mae", "rmse", "r2") if _metric_value(metricas_seleccionadas, name) is None]
+        if missing:
+            observacion = f"El reporte no expone todas las metricas de regresion esperadas. Faltan: {', '.join(missing)}."
+
+    return ModeloMetricasMLRead(
+        id=modelo.id,
+        tipo_modelo=modelo.tipo_modelo,
+        version=version,
+        activo=bool(modelo.activo),
+        problem_type="classification" if is_classification else "regression",
+        source=version,
+        description=modelo.descripcion,
+        mape=None if is_classification else _metric_value(metricas_seleccionadas, "mape_pct_nonzero_only", "mape"),
+        rmse=None if is_classification else _metric_value(metricas_seleccionadas, "rmse"),
+        r2=None if is_classification else _metric_value(metricas_seleccionadas, "r2"),
+        mae=None if is_classification else _metric_value(metricas_seleccionadas, "mae"),
+        accuracy=_metric_value(metricas_seleccionadas, "accuracy"),
+        f1_macro=_metric_value(metricas_seleccionadas, "f1_macro"),
+        f1_alta=_metric_value(metricas_seleccionadas, "f1_alta"),
+        f1_baja=_metric_value(metricas_seleccionadas, "f1_baja"),
+        note=observacion,
+        metricas_originales=metricas_seleccionadas,
+    )
 
 
 def _estado_alerta_desde_resultado(
@@ -504,6 +621,13 @@ async def list_riesgo_abastecimiento(
             )
         )
     return enriched_rows
+
+
+async def get_ml_metrics_dashboard(current_user: CurrentUser) -> list[ModeloMetricasMLRead]:
+    _require_roles(current_user, UserRole.administrador)
+    client = await create_service_role_client()
+    modelos = await list_modelos_ml(client, activo=True)
+    return [_build_ml_metric_row(modelo) for modelo in modelos]
 
 
 async def recalculate_demand(
