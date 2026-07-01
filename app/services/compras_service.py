@@ -10,7 +10,7 @@ from fastapi import HTTPException, status
 from supabase._async.client import AsyncClient
 
 from app.ml.inference.features import recolectar_features_lead_time_compra
-from app.ml.inference.runtime import predecir_lead_time_compra
+from app.ml.inference.runtime import get_active_model, predecir_lead_time_compra
 from app.ml.inference.ranking_service import generate_ranking_for_rfq
 from app.services.maestros_service import list_proveedores
 from app.services.operaciones_service import list_prs
@@ -35,7 +35,7 @@ from app.schemas.compras import (
     RFQStatusUpdate,
     RankingProveedorRead,
 )
-from app.schemas.enums import AlertSeverity, AlertType, PurchaseOrderStatus, PurchaseRequestStatus, RFQStatus, UserRole
+from app.schemas.enums import AlertSeverity, AlertType, MLModelType, PurchaseOrderStatus, PurchaseRequestStatus, RFQStatus, UserRole
 
 
 logger = logging.getLogger("caleand")
@@ -91,6 +91,120 @@ def _group_rows_by(rows: list, key_getter) -> dict[str, list]:
         key = str(key_getter(row))
         grouped.setdefault(key, []).append(row)
     return grouped
+
+
+async def _current_inventory_stock(client: AsyncClient, *, repuesto_id: str, sede_id: str) -> int:
+    response = (
+        await client.table("inventario")
+        .select("id,stock_actual")
+        .eq("repuesto_id", repuesto_id)
+        .eq("sede_id", sede_id)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
+        return 0
+    return int(response.data[0]["stock_actual"] or 0)
+
+
+async def _set_inventory_stock(client: AsyncClient, *, repuesto_id: str, sede_id: str, stock_actual: int) -> None:
+    existing = (
+        await client.table("inventario")
+        .select("id")
+        .eq("repuesto_id", repuesto_id)
+        .eq("sede_id", sede_id)
+        .limit(1)
+        .execute()
+    )
+    payload = {
+        "repuesto_id": repuesto_id,
+        "sede_id": sede_id,
+        "stock_actual": max(int(stock_actual), 0),
+        "updated_at": _utcnow().isoformat(),
+    }
+    if existing.data:
+        await client.table("inventario").update(payload).eq("id", existing.data[0]["id"]).execute()
+    else:
+        await client.table("inventario").insert(payload).execute()
+
+
+async def _normalize_reception_inventory_sede(
+    client: AsyncClient,
+    *,
+    oc_id: str,
+    recepcion_id: str,
+    registrado_por: str,
+    target_sede_id: str | None,
+    detalles: list,
+    created_after: datetime,
+) -> None:
+    if not target_sede_id:
+        return
+
+    conformes = [item for item in detalles if getattr(item, "conformidad", None) == "conforme"]
+    if not conformes:
+        return
+
+    repuesto_ids = sorted({str(item.repuesto_id) for item in conformes})
+    movements_response = (
+        await client.table("movimientos_inventario")
+        .select("id,repuesto_id,sede_id,cantidad,orden_compra_id,registrado_por,created_at,motivo")
+        .eq("orden_compra_id", oc_id)
+        .eq("tipo", "entrada_compra")
+        .eq("registrado_por", registrado_por)
+        .in_("repuesto_id", repuesto_ids)
+        .gte("created_at", created_after.isoformat())
+        .order("created_at", desc=False)
+        .execute()
+    )
+    pending_rows = list(movements_response.data or [])
+    if not pending_rows:
+        return
+
+    for item in conformes:
+        repuesto_id = str(item.repuesto_id)
+        cantidad = int(item.cantidad_recibida)
+        match_index = next(
+            (
+                index
+                for index, row in enumerate(pending_rows)
+                if str(row.get("repuesto_id")) == repuesto_id and int(row.get("cantidad") or 0) == cantidad
+            ),
+            None,
+        )
+        if match_index is None:
+            continue
+
+        movement_row = pending_rows.pop(match_index)
+        source_sede_id = str(movement_row.get("sede_id") or "")
+        if not source_sede_id or source_sede_id == target_sede_id:
+            continue
+
+        source_stock = await _current_inventory_stock(client, repuesto_id=repuesto_id, sede_id=source_sede_id)
+        target_stock = await _current_inventory_stock(client, repuesto_id=repuesto_id, sede_id=target_sede_id)
+
+        await _set_inventory_stock(
+            client,
+            repuesto_id=repuesto_id,
+            sede_id=source_sede_id,
+            stock_actual=max(source_stock - cantidad, 0),
+        )
+        await _set_inventory_stock(
+            client,
+            repuesto_id=repuesto_id,
+            sede_id=target_sede_id,
+            stock_actual=target_stock + cantidad,
+        )
+        await client.table("movimientos_inventario").update({"sede_id": target_sede_id}).eq("id", movement_row["id"]).execute()
+        await (
+            client.table("alertas")
+            .update({"sede_id": target_sede_id})
+            .eq("repuesto_id", repuesto_id)
+            .eq("sede_id", source_sede_id)
+            .gte("created_at", created_after.isoformat())
+            .like("mensaje", f"%{oc_id}%")
+            .execute()
+        )
 
 
 async def _enrich_rfq_details(client: AsyncClient, detail_rows: list[dict]) -> list[RFQDetalleRead]:
@@ -321,11 +435,20 @@ async def update_rfq_status(client: AsyncClient, current_user: CurrentUser, rfq_
 
 async def get_rfq_ranking(client: AsyncClient, rfq_id: str) -> list[RankingProveedorRead]:
     try:
+        active_model = get_active_model(MLModelType.xgboost_proveedor)
         rows = await client.table("ranking_proveedores_ml").select(
             "id,rfq_id,proveedor_id,repuesto_id,score_total_ml,ranking_posicion,canal_sugerido_ml,version_modelo,created_at"
         ).eq("rfq_id", rfq_id).order("ranking_posicion", desc=False).execute()
-        if not rows.data:
-            generated = await generate_ranking_for_rfq(client, rfq_id)
+        should_regenerate = not rows.data
+        if rows.data and active_model is not None:
+            should_regenerate = any(
+                not row.get("version_modelo")
+                or row.get("version_modelo") == "heuristic_fallback"
+                or row.get("version_modelo") != active_model.version
+                for row in rows.data
+            )
+        if should_regenerate:
+            generated = await generate_ranking_for_rfq(client, rfq_id, force=bool(rows.data))
             if generated:
                 rows = await client.table("ranking_proveedores_ml").select(
                     "id,rfq_id,proveedor_id,repuesto_id,score_total_ml,ranking_posicion,canal_sugerido_ml,version_modelo,created_at"
@@ -481,6 +604,7 @@ async def create_recepcion_oc(
     client: AsyncClient, current_user: CurrentUser, oc_id: str, payload: OrdenCompraRecepcionCreate
 ) -> RecepcionOCRead:
     _require_roles(current_user, UserRole.almacenero, UserRole.administrador)
+    recepcion_started_at = _utcnow()
     current = await _fetch_oc(client, oc_id)
     if current.estado not in {PurchaseOrderStatus.aprobada, PurchaseOrderStatus.enviada, PurchaseOrderStatus.pendiente, PurchaseOrderStatus.recibida_parcial}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La OC no permite recepciones en este estado.")
@@ -488,6 +612,10 @@ async def create_recepcion_oc(
     if current.pr_id:
         pr_response = await client.table("requisiciones_compra").select("sede_id").eq("id", str(current.pr_id)).single().execute()
         pr_sede_id = str(pr_response.data["sede_id"]) if pr_response.data and pr_response.data.get("sede_id") else None
+    ot_sede_id: str | None = None
+    if not pr_sede_id and current.ot_id:
+        ot_response = await client.table("ordenes_trabajo").select("sede_id").eq("id", str(current.ot_id)).single().execute()
+        ot_sede_id = str(ot_response.data["sede_id"]) if ot_response.data and ot_response.data.get("sede_id") else None
     recepcion_response = await client.table("recepciones_oc").insert(
         {"oc_id": oc_id, "recibido_por": str(current_user.id)}
     ).execute()
@@ -508,6 +636,15 @@ async def create_recepcion_oc(
             }
         )
     await client.table("recepciones_oc_detalle").insert(detalle_rows).execute()
+    await _normalize_reception_inventory_sede(
+        client,
+        oc_id=oc_id,
+        recepcion_id=recepcion_id,
+        registrado_por=str(current_user.id),
+        target_sede_id=pr_sede_id or ot_sede_id,
+        detalles=payload.detalles,
+        created_after=recepcion_started_at,
+    )
     if any_no_conforme:
         for item in payload.detalles:
             if item.conformidad == "no_conforme":

@@ -274,8 +274,31 @@ def _score_provider(candidate: RankingProveedorCandidate) -> float:
     return round(score, 4)
 
 
+def _provider_payload(candidate: RankingProveedorCandidate) -> list[float]:
+    return [
+        float(candidate.tasa_entrega_a_tiempo or 0),
+        float(candidate.tasa_defectos or 0),
+        float(candidate.precio_promedio or 0),
+        float(candidate.volumen_compras_previas or 0),
+        float(candidate.lead_time_estimado_dias or 0),
+    ]
+
+
 def predecir_ranking_proveedores(candidates: list[RankingProveedorCandidate]) -> list[RankingProveedorItem]:
-    scored = sorted((( _score_provider(candidate), candidate) for candidate in candidates), key=lambda item: item[0], reverse=True)
+    model = get_active_model(MLModelType.xgboost_proveedor)
+    scored: list[tuple[float, RankingProveedorCandidate]] = []
+    for candidate in candidates:
+        score: float | None = None
+        if model and model.artifact is not None:
+            try:
+                prediction = model.artifact.predict([_provider_payload(candidate)])
+                score = float(prediction[0])
+            except Exception:
+                score = None
+        if score is None:
+            score = _score_provider(candidate)
+        scored.append((round(score, 6), candidate))
+    scored.sort(key=lambda item: item[0], reverse=True)
     items: list[RankingProveedorItem] = []
     for position, (score, candidate) in enumerate(scored, start=1):
         items.append(

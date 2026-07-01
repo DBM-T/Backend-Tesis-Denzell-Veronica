@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
@@ -174,6 +174,7 @@ class InventarioRead(BaseModel):
     punto_reorden_sugerido_ml: int | None = None
     updated_at: datetime
     critico: bool = False
+    estado_stock: Literal["OK", "BAJO", "CRITICO"] = "OK"
 
 
 class InventarioCriticoRead(InventarioRead):

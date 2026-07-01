@@ -8,7 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
-ReporteTipo = Literal["consumo", "compras", "alertas", "lead_time", "desempeno_proveedores"]
+ReporteTipo = Literal["consumo", "compras", "alertas", "lead_time", "desempeno_proveedores", "kpis_abastecimiento"]
 ReporteFormato = Literal["csv", "pdf", "xlsx"]
 PlanContinuidadTipo = Literal["respaldo", "mantenimiento", "actualizacion_modelo"]
 
@@ -29,6 +29,30 @@ class ReporteRead(BaseModel):
     generado_por: UUID
     url_archivo: str | None = None
     created_at: datetime
+
+
+class ReporteKpiResumenRead(BaseModel):
+    tasa_quiebres_stock_pct: Decimal
+    rotacion_inventario: Decimal
+    tiempo_promedio_reposicion_dias: Decimal
+    tasa_cumplimiento_proveedores_pct: Decimal
+
+
+class ReporteKpiTendenciaRead(BaseModel):
+    period: str
+    label: str
+    tasa_quiebres_stock_pct: Decimal
+    rotacion_inventario: Decimal
+    tiempo_promedio_reposicion_dias: Decimal
+    tasa_cumplimiento_proveedores_pct: Decimal
+
+
+class ReporteKpiWorkspaceRead(BaseModel):
+    fecha_inicio: date
+    fecha_fin: date
+    resumen: ReporteKpiResumenRead
+    tendencia: list[ReporteKpiTendenciaRead]
+    reportes_generados: list[ReporteRead] = Field(default_factory=list)
 
 
 class IndicadorValidacionCreate(BaseModel):
@@ -69,4 +93,3 @@ class PlanContinuidadUpdate(BaseModel):
     descripcion: str | None = Field(default=None, min_length=1)
     frecuencia: str | None = None
     responsable_id: UUID | None = None
-

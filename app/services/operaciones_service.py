@@ -26,6 +26,7 @@ from app.schemas.operaciones import (
     DiagnosticRequest,
     InventoryMovementCreate,
     InventoryMovementRead,
+    InventoryWorkspaceRead,
     PriorityClassificationRequest,
     PriorityClassificationResponse,
     PurchaseRequestCreate,
@@ -42,6 +43,11 @@ from app.schemas.operaciones import (
 )
 from app.schemas.sedes import SedeRead
 from app.schemas.usuarios import UsuarioRead
+from app.services.maestros_service import (
+    list_all_categorias_public,
+    list_inventario_critico_full,
+    list_inventario,
+)
 from app.services.ventas_service import get_sale_by_ot
 from app.services.users_service import list_sedes, list_users
 
@@ -132,6 +138,40 @@ def _part_row(row: dict) -> RepuestoRead:
 def _page_range(page: int, page_size: int) -> tuple[int, int]:
     start = max(page - 1, 0) * page_size
     return start, start + page_size - 1
+
+
+def _response_total(response, fallback: int) -> int:
+    count = getattr(response, "count", None)
+    return int(count) if count is not None else fallback
+
+
+def _chunked(values: set[str], size: int = 200) -> list[list[str]]:
+    ordered = sorted(values)
+    return [ordered[index:index + size] for index in range(0, len(ordered), size)]
+
+
+async def _fetch_id_map(client: AsyncClient, *, table: str, select_fields: str, ids: set[str]) -> dict[str, dict]:
+    if not ids:
+        return {}
+    rows: list[dict] = []
+    for chunk in _chunked(ids):
+        response = await client.table(table).select(select_fields).in_("id", chunk).execute()
+        rows.extend(response.data or [])
+    return {str(row["id"]): row for row in rows}
+
+
+async def _upsert_inventory_stock(client: AsyncClient, *, repuesto_id: str, sede_id: str, stock_actual: int) -> int:
+    existing = await client.table("inventario").select("id").eq("repuesto_id", repuesto_id).eq("sede_id", sede_id).limit(1).execute()
+    payload = {
+        "repuesto_id": repuesto_id,
+        "sede_id": sede_id,
+        "stock_actual": stock_actual,
+    }
+    if existing.data:
+        await client.table("inventario").update(payload).eq("id", existing.data[0]["id"]).execute()
+    else:
+        await client.table("inventario").insert(payload).execute()
+    return stock_actual
 
 
 async def _fetch_work_order(client: AsyncClient, ot_id: str) -> WorkOrderRead:
@@ -559,6 +599,47 @@ async def list_active_parts_catalog(client: AsyncClient) -> list[RepuestoRead]:
     return [_part_row(row) for row in response.data or []]
 
 
+async def list_active_work_orders_catalog(client: AsyncClient) -> list[WorkOrderListRead]:
+    response = await (
+        client.table("ordenes_trabajo")
+        .select(
+            "id,codigo_ot,cliente_nombre,cliente_documento,cliente_telefono,vehiculo_placa,"
+            "vehiculo_marca,vehiculo_modelo,vehiculo_anio,servicio_solicitado,sede_id,asesor_id,"
+            "tecnico_id,estado,prioridad_ml,confianza_ml,fecha_diagnostico,"
+            "fecha_completado,created_at,updated_at"
+        )
+        .in_(
+            "estado",
+            [
+                WorkOrderStatus.registrada.value,
+                WorkOrderStatus.diagnostico.value,
+                WorkOrderStatus.waiting_parts.value,
+                WorkOrderStatus.in_progress.value,
+                WorkOrderStatus.tech_completed.value,
+            ],
+        )
+        .order("updated_at", desc=True)
+        .execute()
+    )
+    rows = response.data or []
+    technician_names: dict[str, str] = {}
+    technician_ids = sorted({str(row["tecnico_id"]) for row in rows if row.get("tecnico_id")})
+    if technician_ids:
+        technicians_response = await (
+            client.table("perfiles").select("id,nombres,apellidos,email").in_("id", technician_ids).execute()
+        )
+        for technician in technicians_response.data or []:
+            full_name = f"{technician.get('nombres') or ''} {technician.get('apellidos') or ''}".strip()
+            technician_names[str(technician["id"])] = full_name or str(technician.get("email") or "")
+    result: list[WorkOrderListRead] = []
+    for row in rows:
+        payload = dict(row)
+        if row.get("tecnico_id"):
+            payload["tecnico_nombre"] = technician_names.get(str(row["tecnico_id"]))
+        result.append(WorkOrderListRead.model_validate(payload))
+    return result
+
+
 async def get_ot_workspace(
     client: AsyncClient,
     current_user: CurrentUser,
@@ -665,33 +746,81 @@ async def _current_stock(client: AsyncClient, repuesto_id: str, sede_id: str) ->
     return int(response.data[0]["stock_actual"])
 
 
+async def _enrich_movement_rows(client: AsyncClient, rows: list[dict], *, stock_result_map: dict[str, int] | None = None) -> list[InventoryMovementRead]:
+    stock_result_map = stock_result_map or {}
+    repuesto_ids = {str(row["repuesto_id"]) for row in rows if row.get("repuesto_id")}
+    sede_ids = {str(row["sede_id"]) for row in rows if row.get("sede_id")}
+    ot_ids = {str(row["ot_id"]) for row in rows if row.get("ot_id")}
+    oc_ids = {str(row["orden_compra_id"]) for row in rows if row.get("orden_compra_id")}
+    registrado_por_ids = {str(row["registrado_por"]) for row in rows if row.get("registrado_por")}
+
+    repuestos_map, sedes_map, ot_map, oc_map, perfiles_map = await asyncio.gather(
+        _fetch_id_map(client, table="repuestos", select_fields="id,codigo_sku,nombre", ids=repuesto_ids),
+        _fetch_id_map(client, table="sedes", select_fields="id,nombre", ids=sede_ids),
+        _fetch_id_map(client, table="ordenes_trabajo", select_fields="id,codigo_ot", ids=ot_ids),
+        _fetch_id_map(client, table="ordenes_compra", select_fields="id,codigo_oc", ids=oc_ids),
+        _fetch_id_map(client, table="perfiles", select_fields="id,nombres,apellidos", ids=registrado_por_ids),
+    )
+
+    enriched: list[InventoryMovementRead] = []
+    for row in rows:
+        repuesto = repuestos_map.get(str(row.get("repuesto_id")), {})
+        sede = sedes_map.get(str(row.get("sede_id")), {})
+        ot = ot_map.get(str(row.get("ot_id")), {})
+        oc = oc_map.get(str(row.get("orden_compra_id")), {})
+        perfil = perfiles_map.get(str(row.get("registrado_por")), {})
+        payload = dict(row)
+        payload["codigo_sku"] = repuesto.get("codigo_sku")
+        payload["repuesto_nombre"] = repuesto.get("nombre")
+        payload["sede_nombre"] = sede.get("nombre")
+        payload["codigo_ot"] = ot.get("codigo_ot")
+        payload["codigo_oc"] = oc.get("codigo_oc")
+        payload["registrado_por_nombre"] = " ".join(
+            part for part in [perfil.get("nombres"), perfil.get("apellidos")] if part
+        ) or None
+        payload["stock_resultante"] = stock_result_map.get(str(row.get("id")))
+        enriched.append(_movement_row(payload))
+    return enriched
+
+
 async def create_inventory_movement(
     client: AsyncClient, current_user: CurrentUser, payload: InventoryMovementCreate
 ) -> InventoryMovementRead:
-    _require_roles(current_user, UserRole.tecnico, UserRole.almacenero, UserRole.administrador)
-    if payload.tipo == InventoryMoveType.entrada_compra:
+    _require_roles(current_user, UserRole.tecnico, UserRole.almacenero, UserRole.administrador, UserRole.logistica)
+    if payload.tipo != InventoryMoveType.salida_consumo:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Los movimientos entrada_compra solo se generan desde recepciones de OC.",
-        )
-    if payload.tipo == InventoryMoveType.transferencia:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Transferencia no esta soportada por este endpoint.",
+            detail=(
+                "Los movimientos manuales de este modulo solo permiten salida_consumo asociada a una OT. "
+                "Las entradas por compra se generan desde recepciones de OC."
+            ),
         )
     if payload.tipo == InventoryMoveType.salida_consumo and payload.ot_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="ot_id es obligatorio para salida_consumo.",
         )
+    if payload.tipo == InventoryMoveType.salida_consumo and payload.ot_id is not None:
+        ot = await _fetch_work_order(client, str(payload.ot_id))
+        if str(ot.sede_id) != str(payload.sede_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La sede del movimiento debe coincidir con la sede de la OT.",
+            )
 
     current_stock = await _current_stock(client, str(payload.repuesto_id), str(payload.sede_id))
-    if payload.tipo in {InventoryMoveType.salida_consumo, InventoryMoveType.ajuste_negativo}:
-        if current_stock < payload.cantidad:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Stock insuficiente para registrar el movimiento.",
-            )
+    if current_stock < payload.cantidad:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Stock insuficiente para registrar el movimiento.",
+        )
+    delta = -payload.cantidad
+    resulting_stock = current_stock + delta
+    if resulting_stock < 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="El movimiento dejaria stock negativo.",
+        )
 
     response = await client.table("movimientos_inventario").insert(
         {
@@ -704,7 +833,19 @@ async def create_inventory_movement(
             "registrado_por": str(current_user.id),
         }
     ).execute()
-    return _movement_row(response.data[0])
+    movement_row = response.data[0]
+    try:
+        await _upsert_inventory_stock(
+            client,
+            repuesto_id=str(payload.repuesto_id),
+            sede_id=str(payload.sede_id),
+            stock_actual=resulting_stock,
+        )
+    except Exception:
+        await client.table("movimientos_inventario").delete().eq("id", movement_row["id"]).execute()
+        raise
+    enriched = await _enrich_movement_rows(client, [movement_row], stock_result_map={str(movement_row["id"]): resulting_stock})
+    return enriched[0]
 
 
 async def list_inventory_movements(
@@ -719,7 +860,8 @@ async def list_inventory_movements(
     hasta: date | None = None,
 ) -> PaginatedResponse[InventoryMovementRead]:
     query = client.table("movimientos_inventario").select(
-        "id,repuesto_id,sede_id,tipo,cantidad,ot_id,orden_compra_id,motivo,registrado_por,created_at"
+        "id,repuesto_id,sede_id,tipo,cantidad,ot_id,orden_compra_id,motivo,registrado_por,created_at",
+        count="exact",
     )
     if repuesto_id:
         query = query.eq("repuesto_id", repuesto_id)
@@ -733,10 +875,64 @@ async def list_inventory_movements(
         query = query.lte("created_at", hasta.isoformat())
     start, end = _page_range(page, page_size)
     response = await query.order("created_at", desc=True).range(start, end).execute()
-    items = [_movement_row(row) for row in response.data or []]
+    items = await _enrich_movement_rows(client, response.data or [])
     return PaginatedResponse[InventoryMovementRead](
         items=items,
         page=page,
         page_size=page_size,
-        total=len(items),
+        total=_response_total(response, len(items)),
+    )
+
+
+async def get_inventory_workspace(
+    client: AsyncClient,
+    *,
+    inventory_page: int = 1,
+    inventory_page_size: int = 20,
+    critical_page: int = 1,
+    critical_page_size: int = 12,
+    movement_page: int = 1,
+    movement_page_size: int = 20,
+) -> InventoryWorkspaceRead:
+    catalog_client = await create_service_role_client()
+    categorias_task = list_all_categorias_public()
+    repuestos_task = list_active_parts_catalog(catalog_client)
+    inventario_task = list_inventario(client, page=inventory_page, page_size=inventory_page_size)
+    criticos_task = list_inventario_critico_full(client, sede_id=None)
+    movimientos_task = list_inventory_movements(client, page=movement_page, page_size=movement_page_size)
+    sedes_task = list_sedes(client)
+    ordenes_task = list_active_work_orders_catalog(client)
+
+    categorias, repuestos, inventario, critical_items, movimientos, sedes, ordenes = await asyncio.gather(
+        categorias_task,
+        repuestos_task,
+        inventario_task,
+        criticos_task,
+        movimientos_task,
+        sedes_task,
+        ordenes_task,
+    )
+
+    criticos_total = len(critical_items)
+    bajos_total = sum(1 for item in critical_items if item.estado_stock == "BAJO")
+    critical_start, critical_end = _page_range(critical_page, critical_page_size)
+    criticos = PaginatedResponse(
+        items=critical_items[critical_start : critical_end + 1],
+        page=critical_page,
+        page_size=critical_page_size,
+        total=criticos_total,
+    )
+    return InventoryWorkspaceRead(
+        categorias=categorias,
+        repuestos=repuestos,
+        inventario=inventario,
+        criticos=criticos,
+        movimientos=movimientos,
+        sedes=sedes,
+        ordenes_trabajo=ordenes,
+        repuestos_total=len(repuestos),
+        inventario_total=inventario.total or len(inventario.items),
+        criticos_total=criticos_total,
+        bajos_total=bajos_total,
+        movimientos_total=movimientos.total or len(movimientos.items),
     )

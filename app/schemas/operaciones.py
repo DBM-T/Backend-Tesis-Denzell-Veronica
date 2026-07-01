@@ -11,8 +11,13 @@ from app.schemas.enums import (
     PurchaseRequestStatus,
     WorkOrderStatus,
 )
-from app.schemas.maestros import PaginatedResponse
-from app.schemas.maestros import RepuestoRead
+from app.schemas.maestros import (
+    CategoriaRead,
+    InventarioCriticoRead,
+    InventarioRead,
+    PaginatedResponse,
+    RepuestoRead,
+)
 from app.schemas.sedes import SedeRead
 from app.schemas.usuarios import UsuarioRead
 
@@ -160,6 +165,13 @@ class InventoryMovementRead(BaseModel):
     orden_compra_id: UUID | None = None
     motivo: str | None = None
     registrado_por: UUID
+    codigo_sku: str | None = None
+    repuesto_nombre: str | None = None
+    sede_nombre: str | None = None
+    codigo_ot: str | None = None
+    codigo_oc: str | None = None
+    registrado_por_nombre: str | None = None
+    stock_resultante: Decimal | None = None
     created_at: datetime
 
 
@@ -230,6 +242,21 @@ class OTWorkspaceRead(BaseModel):
     sedes: list[SedeRead]
     technicians: list[UsuarioRead]
     active_parts: list[RepuestoRead]
+
+
+class InventoryWorkspaceRead(BaseModel):
+    categorias: list[CategoriaRead]
+    repuestos: list[RepuestoRead]
+    inventario: PaginatedResponse[InventarioRead]
+    criticos: PaginatedResponse[InventarioCriticoRead]
+    movimientos: PaginatedResponse[InventoryMovementRead]
+    sedes: list[SedeRead]
+    ordenes_trabajo: list[WorkOrderListRead]
+    repuestos_total: int
+    inventario_total: int
+    criticos_total: int
+    bajos_total: int
+    movimientos_total: int
 
 
 PaginatedPurchaseRequestResponse = PaginatedResponse[PurchaseRequestRead]

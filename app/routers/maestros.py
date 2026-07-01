@@ -24,6 +24,7 @@ from app.schemas.maestros import (
     RepuestoRead,
     RepuestoUpdate,
 )
+from app.schemas.operaciones import InventoryWorkspaceRead
 from app.services.maestros_service import (
     create_categoria,
     create_parametro_inventario,
@@ -48,6 +49,7 @@ from app.services.maestros_service import (
     update_proveedor,
     update_repuesto,
 )
+from app.services.operaciones_service import get_inventory_workspace
 
 
 router = APIRouter()
@@ -55,6 +57,10 @@ router = APIRouter()
 
 def write_guard():
     return require_role(UserRole.administrador, UserRole.logistica)
+
+
+def part_write_guard():
+    return require_role(UserRole.administrador, UserRole.logistica, UserRole.almacenero)
 
 
 @router.get(
@@ -239,7 +245,7 @@ async def get_repuestos(
 )
 async def post_repuesto(
     payload: RepuestoCreate,
-    current_user: CurrentUser = Depends(write_guard()),
+    current_user: CurrentUser = Depends(part_write_guard()),
 ):
     return await create_repuesto(current_user.supabase, payload)
 
@@ -253,7 +259,7 @@ async def post_repuesto(
 async def put_repuesto(
     repuesto_id: UUID,
     payload: RepuestoUpdate,
-    current_user: CurrentUser = Depends(write_guard()),
+    current_user: CurrentUser = Depends(part_write_guard()),
 ):
     return await update_repuesto(current_user.supabase, str(repuesto_id), payload)
 
@@ -266,9 +272,35 @@ async def put_repuesto(
 )
 async def delete_repuesto_endpoint(
     repuesto_id: UUID,
-    current_user: CurrentUser = Depends(write_guard()),
+    current_user: CurrentUser = Depends(part_write_guard()),
 ):
     return await delete_repuesto(current_user.supabase, str(repuesto_id))
+
+
+@router.get(
+    "/inventario/workspace",
+    response_model=InventoryWorkspaceRead,
+    summary="Workspace inventario",
+    description="Carga repuestos, stock actual, criticos, movimientos recientes, sedes y OTs activas para el modulo de inventario.",
+)
+async def get_inventario_workspace(
+    inventory_page: int = Query(default=1, ge=1),
+    inventory_page_size: int = Query(default=20, ge=1, le=100),
+    critical_page: int = Query(default=1, ge=1),
+    critical_page_size: int = Query(default=12, ge=1, le=100),
+    movement_page: int = Query(default=1, ge=1),
+    movement_page_size: int = Query(default=20, ge=1, le=100),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return await get_inventory_workspace(
+        current_user.supabase,
+        inventory_page=inventory_page,
+        inventory_page_size=inventory_page_size,
+        critical_page=critical_page,
+        critical_page_size=critical_page_size,
+        movement_page=movement_page,
+        movement_page_size=movement_page_size,
+    )
 
 
 @router.get(

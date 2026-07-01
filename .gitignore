@@ -33,10 +33,12 @@ AGENTS.md.tmp
 *.mcp.json
 *.swp
 *.swo
+*supabase
 *~
-
+tmp_report_test
 # Archivos temporales
-test_db.py
+*test_db.py
+.tmp_report_test
 *.temp
 *.tmp
 *.log

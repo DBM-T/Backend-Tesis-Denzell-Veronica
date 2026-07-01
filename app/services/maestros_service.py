@@ -55,6 +55,16 @@ def _parse_rows(response) -> list[dict[str, Any]]:
     return list(response.data or [])
 
 
+def _response_total(response, fallback: int) -> int:
+    count = getattr(response, "count", None)
+    return int(count) if count is not None else fallback
+
+
+def _chunked_values(values: set[str], size: int = 200) -> list[list[str]]:
+    ordered = sorted(values)
+    return [ordered[index : index + size] for index in range(0, len(ordered), size)]
+
+
 def _check_write_role(role: UserRole) -> None:
     if role not in {UserRole.administrador, UserRole.logistica}:
         raise HTTPException(
@@ -83,6 +93,14 @@ def _to_inventario(row: dict[str, Any]) -> InventarioRead:
     return InventarioRead.model_validate(row)
 
 
+def _inventory_status(*, stock_actual: int, stock_minimo: int | None, punto_reorden: int | None) -> str:
+    if stock_minimo is not None and stock_actual <= int(stock_minimo):
+        return "CRITICO"
+    if punto_reorden is not None and stock_actual <= int(punto_reorden):
+        return "BAJO"
+    return "OK"
+
+
 async def _paginate(query, *, page: int, page_size: int):
     return await query.range(_offset(page, page_size), _page_end(page, page_size)).execute()
 
@@ -106,7 +124,7 @@ async def list_categorias(
     parent_id: UUID | None = None,
     q: str | None = None,
 ) -> PaginatedResponse[CategoriaRead]:
-    query = client.table("categorias").select(MAESTROS_SELECT["categorias"])
+    query = client.table("categorias").select(MAESTROS_SELECT["categorias"], count="exact")
     if parent_id is not None:
         query = query.eq("categoria_padre_id", str(parent_id))
     if q:
@@ -154,6 +172,14 @@ async def list_categorias_public(
     )
 
 
+async def list_all_categorias_public() -> list[CategoriaRead]:
+    service_client = await create_service_role_client()
+    response = await service_client.table("categorias").select(MAESTROS_SELECT["categorias"]).order(
+        "nombre"
+    ).execute()
+    return [_to_category(row) for row in _parse_rows(response)]
+
+
 async def list_categorias_tree_public() -> list[CategoriaTreeNode]:
     service_client = await create_service_role_client()
     return await list_categorias_tree(service_client)
@@ -186,7 +212,7 @@ async def list_proveedores(
     canal_preferido: str | None = None,
     q: str | None = None,
 ) -> PaginatedResponse[ProveedorRead]:
-    query = client.table("proveedores").select(MAESTROS_SELECT["proveedores"])
+    query = client.table("proveedores").select(MAESTROS_SELECT["proveedores"], count="exact")
     if estado is not None:
         query = query.eq("estado", estado.value)
     if canal_preferido:
@@ -195,7 +221,7 @@ async def list_proveedores(
         query = query.ilike("razon_social", f"%{q}%")
     response = await _paginate(query.order("created_at", desc=True), page=page, page_size=page_size)
     items = [_to_provider(row) for row in _parse_rows(response)]
-    total = len(items)
+    total = _response_total(response, len(items))
     return PaginatedResponse[ProveedorRead](items=items, page=page, page_size=page_size, total=total)
 
 
@@ -281,7 +307,7 @@ async def list_repuestos(
     estado: UserStatus | None = None,
     q: str | None = None,
 ) -> PaginatedResponse[RepuestoRead]:
-    query = client.table("repuestos").select(MAESTROS_SELECT["repuestos"])
+    query = client.table("repuestos").select(MAESTROS_SELECT["repuestos"], count="exact")
     if sede_id is not None:
         query = query.eq("sede_id", str(sede_id))
     if categoria_id is not None:
@@ -290,9 +316,13 @@ async def list_repuestos(
         query = query.eq("estado", estado.value)
     if q:
         query = query.or_(f"codigo_sku.ilike.%{q}%,nombre.ilike.%{q}%")
-    response = await _paginate(query.order("created_at", desc=True), page=page, page_size=page_size)
+    response = await _paginate(
+        query.order("created_at", desc=True).order("id", desc=True),
+        page=page,
+        page_size=page_size,
+    )
     items = [_to_repuesto(row) for row in _parse_rows(response)]
-    total = len(items)
+    total = _response_total(response, len(items))
     return PaginatedResponse[RepuestoRead](items=items, page=page, page_size=page_size, total=total)
 
 
@@ -327,14 +357,16 @@ async def list_parametros_inventario(
     sede_id: UUID | None = None,
     repuesto_id: UUID | None = None,
 ) -> PaginatedResponse[ParametroInventarioRead]:
-    query = client.table("parametros_inventario").select(MAESTROS_SELECT["parametros_inventario"])
+    query = client.table("parametros_inventario").select(
+        MAESTROS_SELECT["parametros_inventario"], count="exact"
+    )
     if sede_id is not None:
         query = query.eq("sede_id", str(sede_id))
     if repuesto_id is not None:
         query = query.eq("repuesto_id", str(repuesto_id))
     response = await _paginate(query.order("created_at", desc=True), page=page, page_size=page_size)
     items = [_to_parametro(row) for row in _parse_rows(response)]
-    total = len(items)
+    total = _response_total(response, len(items))
     return PaginatedResponse[ParametroInventarioRead](items=items, page=page, page_size=page_size, total=total)
 
 
@@ -367,24 +399,27 @@ async def _load_related_maps(client: AsyncClient, rows: list[dict[str, Any]]):
     sede_ids = {row["sede_id"] for row in rows}
     repuestos_map: dict[str, dict[str, Any]] = {}
     if repuesto_ids:
-        repuestos_response = await client.table("repuestos").select("id,codigo_sku,nombre,categoria_id,sede_id").in_(
-            "id", list(repuesto_ids)
-        ).execute()
-        repuestos_map = {row["id"]: row for row in _parse_rows(repuestos_response)}
+        for chunk in _chunked_values(repuesto_ids):
+            repuestos_response = await client.table("repuestos").select(
+                "id,codigo_sku,nombre,categoria_id,sede_id"
+            ).in_("id", chunk).execute()
+            repuestos_map.update({row["id"]: row for row in _parse_rows(repuestos_response)})
 
     sedes_map: dict[str, dict[str, Any]] = {}
     if sede_ids:
-        sedes_response = await client.table("sedes").select("id,nombre").in_("id", list(sede_ids)).execute()
-        sedes_map = {row["id"]: row for row in _parse_rows(sedes_response)}
+        for chunk in _chunked_values(sede_ids):
+            sedes_response = await client.table("sedes").select("id,nombre").in_("id", chunk).execute()
+            sedes_map.update({row["id"]: row for row in _parse_rows(sedes_response)})
 
     params_map: dict[tuple[str, str], dict[str, Any]] = {}
     if repuesto_ids and sede_ids:
-        params_response = await client.table("parametros_inventario").select(
-            "repuesto_id,sede_id,stock_minimo,stock_maximo,punto_reorden_sugerido_ml"
-        ).in_("repuesto_id", list(repuesto_ids)).in_("sede_id", list(sede_ids)).execute()
-        params_map = {
-            (row["repuesto_id"], row["sede_id"]): row for row in _parse_rows(params_response)
-        }
+        for repuesto_chunk in _chunked_values(repuesto_ids, size=100):
+            params_response = await client.table("parametros_inventario").select(
+                "repuesto_id,sede_id,stock_minimo,stock_maximo,punto_reorden_sugerido_ml"
+            ).in_("repuesto_id", repuesto_chunk).in_("sede_id", list(sede_ids)).execute()
+            params_map.update(
+                {(row["repuesto_id"], row["sede_id"]): row for row in _parse_rows(params_response)}
+            )
 
     return repuestos_map, sedes_map, params_map
 
@@ -397,7 +432,7 @@ async def list_inventario(
     sede_id: UUID | None = None,
     repuesto_id: UUID | None = None,
 ) -> PaginatedResponse[InventarioRead]:
-    query = client.table("inventario").select(MAESTROS_SELECT["inventario"])
+    query = client.table("inventario").select(MAESTROS_SELECT["inventario"], count="exact")
     if sede_id is not None:
         query = query.eq("sede_id", str(sede_id))
     if repuesto_id is not None:
@@ -413,11 +448,12 @@ async def list_inventario(
         stock_minimo = param.get("stock_minimo")
         punto_reorden = param.get("punto_reorden_sugerido_ml")
         stock_actual = int(row["stock_actual"])
-        critico = False
-        if stock_minimo is not None and stock_actual <= int(stock_minimo):
-            critico = True
-        if punto_reorden is not None and stock_actual <= int(punto_reorden):
-            critico = True
+        estado_stock = _inventory_status(
+            stock_actual=stock_actual,
+            stock_minimo=int(stock_minimo) if stock_minimo is not None else None,
+            punto_reorden=int(punto_reorden) if punto_reorden is not None else None,
+        )
+        critico = estado_stock in {"BAJO", "CRITICO"}
         items.append(
             InventarioRead(
                 id=row["id"],
@@ -432,9 +468,10 @@ async def list_inventario(
                 punto_reorden_sugerido_ml=punto_reorden,
                 updated_at=row["updated_at"],
                 critico=critico,
+                estado_stock=estado_stock,
             )
         )
-    total = len(items)
+    total = _response_total(response, len(items))
     return PaginatedResponse[InventarioRead](items=items, page=page, page_size=page_size, total=total)
 
 
@@ -445,25 +482,65 @@ async def list_inventario_critico(
     page: int,
     page_size: int,
 ) -> PaginatedResponse[InventarioCriticoRead]:
-    inventario = await list_inventario(client, page=page, page_size=page_size, sede_id=sede_id)
+    items = await list_inventario_critico_full(client, sede_id=sede_id)
+    total = len(items)
+    paged_items = items[_offset(page, page_size) : _offset(page, page_size) + page_size]
+    return PaginatedResponse[InventarioCriticoRead](
+        items=paged_items,
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
+
+
+async def list_inventario_critico_full(
+    client: AsyncClient,
+    *,
+    sede_id: UUID | None,
+) -> list[InventarioCriticoRead]:
+    query = client.table("inventario").select(MAESTROS_SELECT["inventario"])
+    if sede_id is not None:
+        query = query.eq("sede_id", str(sede_id))
+    response = await query.order("updated_at", desc=True).execute()
+    rows = _parse_rows(response)
+    repuestos_map, sedes_map, params_map = await _load_related_maps(client, rows)
     items: list[InventarioCriticoRead] = []
-    for item in inventario.items:
-        if not item.critico:
+    for row in rows:
+        repuesto = repuestos_map.get(row["repuesto_id"], {})
+        sede = sedes_map.get(row["sede_id"], {})
+        param = params_map.get((row["repuesto_id"], row["sede_id"]), {})
+        stock_minimo = param.get("stock_minimo")
+        punto_reorden = param.get("punto_reorden_sugerido_ml")
+        stock_actual = int(row["stock_actual"])
+        estado_stock = _inventory_status(
+            stock_actual=stock_actual,
+            stock_minimo=int(stock_minimo) if stock_minimo is not None else None,
+            punto_reorden=int(punto_reorden) if punto_reorden is not None else None,
+        )
+        critico = estado_stock in {"BAJO", "CRITICO"}
+        if not critico:
             continue
         motivo_parts = []
-        if item.stock_minimo is not None and item.stock_actual <= item.stock_minimo:
+        if stock_minimo is not None and stock_actual <= int(stock_minimo):
             motivo_parts.append("stock bajo minimo")
-        if item.punto_reorden_sugerido_ml is not None and item.stock_actual <= item.punto_reorden_sugerido_ml:
+        if punto_reorden is not None and stock_actual <= int(punto_reorden):
             motivo_parts.append("debajo de punto de reorden")
         items.append(
             InventarioCriticoRead(
-                **item.model_dump(),
+                id=row["id"],
+                repuesto_id=row["repuesto_id"],
+                sede_id=row["sede_id"],
+                codigo_sku=repuesto.get("codigo_sku", ""),
+                repuesto_nombre=repuesto.get("nombre", ""),
+                sede_nombre=sede.get("nombre"),
+                stock_actual=stock_actual,
+                stock_minimo=stock_minimo,
+                stock_maximo=param.get("stock_maximo"),
+                punto_reorden_sugerido_ml=punto_reorden,
+                updated_at=row["updated_at"],
+                critico=critico,
+                estado_stock=estado_stock,
                 motivo=" y ".join(motivo_parts) if motivo_parts else "stock critico",
             )
         )
-    return PaginatedResponse[InventarioCriticoRead](
-        items=items,
-        page=page,
-        page_size=page_size,
-        total=len(items),
-    )
+    return items

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import csv
 import io
+import asyncio
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from fastapi import HTTPException, UploadFile, status
 from supabase._async.client import AsyncClient
@@ -24,7 +25,7 @@ from app.schemas.ml import (
     ValidacionCSVRead,
 )
 from app.ml.inference.features import recolectar_features_demanda
-from app.ml.inference.runtime import predecir_demanda
+from app.ml.inference.runtime import MODEL_CACHE, predecir_demanda
 
 
 REQUIRED_COLUMNS = {"repuesto_id", "sede_id", "cantidad_consumida", "fecha_consumo"}
@@ -66,14 +67,41 @@ def _periodo_label(periodo_inicio: date | None, periodo_fin: date | None) -> str
     return f"{periodo_inicio.isoformat()} a {periodo_fin.isoformat()}"
 
 
-async def _build_reference_maps(client: AsyncClient) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict]]:
-    repuestos_response = await client.table("repuestos").select("id,codigo_sku,nombre").execute()
-    sedes_response = await client.table("sedes").select("id,nombre").execute()
-    modelos_response = await client.table("modelos_ml").select("id,tipo_modelo,version").execute()
-    repuestos = {str(row["id"]): row for row in repuestos_response.data or []}
-    sedes = {str(row["id"]): row for row in sedes_response.data or []}
-    modelos = {str(row["id"]): row for row in modelos_response.data or []}
-    return repuestos, sedes, modelos
+def _chunked_ids(values: set[str], chunk_size: int = 200) -> list[list[str]]:
+    ordered = sorted(values)
+    return [ordered[index:index + chunk_size] for index in range(0, len(ordered), chunk_size)]
+
+
+async def _fetch_reference_map(
+    client: AsyncClient,
+    *,
+    table: str,
+    select_fields: str,
+    ids: set[str],
+) -> dict[str, dict]:
+    if not ids:
+        return {}
+
+    rows: list[dict] = []
+    for chunk in _chunked_ids(ids):
+        response = await client.table(table).select(select_fields).in_("id", chunk).execute()
+        rows.extend(response.data or [])
+    return {str(row["id"]): row for row in rows}
+
+
+async def _build_reference_maps(
+    client: AsyncClient,
+    *,
+    repuesto_ids: set[str],
+    sede_ids: set[str],
+    modelo_ids: set[str],
+) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict]]:
+    repuestos_response, sedes_response, modelos_response = await asyncio.gather(
+        _fetch_reference_map(client, table="repuestos", select_fields="id,codigo_sku,nombre", ids=repuesto_ids),
+        _fetch_reference_map(client, table="sedes", select_fields="id,nombre", ids=sede_ids),
+        _fetch_reference_map(client, table="modelos_ml", select_fields="id,tipo_modelo,version", ids=modelo_ids),
+    )
+    return repuestos_response, sedes_response, modelos_response
 
 
 def _require_roles(current_user: CurrentUser, *roles: UserRole) -> None:
@@ -337,7 +365,34 @@ async def list_modelos_ml(
     if limit is not None:
         query = query.limit(limit)
     response = await query.execute()
-    return [ModeloMLRead.model_validate(row) for row in response.data or []]
+    items = [ModeloMLRead.model_validate(row) for row in response.data or []]
+    known_pairs = {(item.tipo_modelo, item.version) for item in items}
+
+    for active_model in MODEL_CACHE.values():
+        if tipo_modelo is not None and active_model.tipo_modelo != tipo_modelo:
+            continue
+        if activo is False:
+            continue
+        pair = (active_model.tipo_modelo, active_model.version)
+        if pair in known_pairs:
+            continue
+        items.append(
+            ModeloMLRead(
+                id=uuid5(NAMESPACE_URL, f"local-model::{active_model.tipo_modelo.value}::{active_model.version}"),
+                tipo_modelo=active_model.tipo_modelo,
+                version=active_model.version,
+                descripcion=f"Modelo local cargado desde {active_model.artifact_path}" if active_model.artifact_path else "Modelo local cargado desde disco",
+                activo=True,
+                entrenado_en=None,
+                aprobado_por=None,
+                created_at=_utcnow(),
+            )
+        )
+
+    items.sort(key=lambda item: item.created_at, reverse=True)
+    if limit is not None:
+        return items[:limit]
+    return items
 
 
 async def list_pronosticos_demanda(
@@ -356,10 +411,16 @@ async def list_pronosticos_demanda(
     if sede_id is not None:
         query = query.eq("sede_id", str(sede_id))
     response = await query.execute()
-    repuestos, sedes, modelos = await _build_reference_maps(service_client)
+    rows = response.data or []
+    repuestos, sedes, modelos = await _build_reference_maps(
+        service_client,
+        repuesto_ids={str(row["repuesto_id"]) for row in rows if row.get("repuesto_id")},
+        sede_ids={str(row["sede_id"]) for row in rows if row.get("sede_id")},
+        modelo_ids={str(row["modelo_id"]) for row in rows if row.get("modelo_id")},
+    )
 
     enriched_rows: list[PronosticoDemandaRead] = []
-    for row in response.data or []:
+    for row in rows:
         repuesto = repuestos.get(str(row["repuesto_id"]), {})
         sede = sedes.get(str(row["sede_id"]), {})
         modelo = modelos.get(str(row["modelo_id"]), {})
@@ -408,10 +469,16 @@ async def list_riesgo_abastecimiento(
     if sede_id is not None:
         query = query.eq("sede_id", str(sede_id))
     response = await query.execute()
-    repuestos, sedes, modelos = await _build_reference_maps(service_client)
+    rows = response.data or []
+    repuestos, sedes, modelos = await _build_reference_maps(
+        service_client,
+        repuesto_ids={str(row["repuesto_id"]) for row in rows if row.get("repuesto_id")},
+        sede_ids={str(row["sede_id"]) for row in rows if row.get("sede_id")},
+        modelo_ids={str(row["modelo_id"]) for row in rows if row.get("modelo_id")},
+    )
 
     enriched_rows: list[RiesgoAbastecimientoRead] = []
-    for row in response.data or []:
+    for row in rows:
         repuesto = repuestos.get(str(row["repuesto_id"]), {})
         sede = sedes.get(str(row["sede_id"]), {})
         modelo = modelos.get(str(row["modelo_id"]), {})

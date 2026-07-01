@@ -13,6 +13,7 @@ from app.schemas.reportes import (
     PlanContinuidadRead,
     PlanContinuidadUpdate,
     ReporteCreate,
+    ReporteKpiWorkspaceRead,
     ReporteRead,
 )
 from app.services.reportes_service import (
@@ -21,6 +22,7 @@ from app.services.reportes_service import (
     create_reporte,
     delete_indicador_validacion,
     delete_plan_continuidad,
+    get_reportes_kpi_workspace,
     list_indicadores_validacion,
     list_plan_continuidad,
     list_reportes,
@@ -30,6 +32,24 @@ from app.services.reportes_service import (
 
 
 router = APIRouter()
+
+
+@router.get(
+    "/kpis-workspace",
+    response_model=ReporteKpiWorkspaceRead,
+    summary="Workspace de KPIs de reportes",
+    description="Devuelve KPIs consolidados de abastecimiento, su evolucion temporal y el historial reciente de exportaciones.",
+)
+async def get_reportes_kpis_workspace(
+    fecha_inicio: date = Query(...),
+    fecha_fin: date = Query(...),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return await get_reportes_kpi_workspace(
+        current_user,
+        fecha_inicio=fecha_inicio,
+        fecha_fin=fecha_fin,
+    )
 
 
 @router.post(
