@@ -14,8 +14,7 @@ from app.ml.inference.features import recolectar_features_prioridad_ot
 from app.ml.inference.priority_service import predict_priority
 from app.schemas.auth import CurrentUser
 from app.schemas.enums import InventoryMoveType, PriorityML, PurchaseRequestStatus, UserRole, UserStatus, WorkOrderStatus
-from app.schemas.maestros import PaginatedResponse
-from app.schemas.maestros import RepuestoRead
+from app.schemas.maestros import InventarioCriticoRead, InventarioRead, PaginatedResponse, RepuestoRead
 from app.schemas.operaciones import (
     AssignTechnicianRequest,
     ChangeWorkOrderStatusRequest,
@@ -44,9 +43,8 @@ from app.schemas.operaciones import (
 from app.schemas.sedes import SedeRead
 from app.schemas.usuarios import UsuarioRead
 from app.services.maestros_service import (
+    _inventory_status,
     list_all_categorias_public,
-    list_inventario_critico_full,
-    list_inventario,
 )
 from app.services.ventas_service import get_sale_by_ot
 from app.services.users_service import list_sedes, list_users
@@ -884,6 +882,66 @@ async def list_inventory_movements(
     )
 
 
+async def _fetch_all_inventory_params_map(client: AsyncClient) -> dict[tuple[str, str], dict]:
+    response = await (
+        client.table("parametros_inventario")
+        .select("repuesto_id,sede_id,stock_minimo,stock_maximo,punto_reorden_sugerido_ml")
+        .execute()
+    )
+    return {(row["repuesto_id"], row["sede_id"]): row for row in response.data or []}
+
+
+def _inventory_read_from_maps(
+    row: dict,
+    *,
+    repuestos_map: dict[str, dict],
+    sedes_map: dict[str, dict],
+    params_map: dict[tuple[str, str], dict],
+) -> InventarioRead:
+    repuesto_id = str(row["repuesto_id"])
+    sede_id = str(row["sede_id"])
+    repuesto = repuestos_map.get(repuesto_id, {})
+    sede = sedes_map.get(sede_id, {})
+    param = params_map.get((repuesto_id, sede_id), {})
+    stock_minimo = param.get("stock_minimo")
+    punto_reorden = param.get("punto_reorden_sugerido_ml")
+    stock_actual = int(row["stock_actual"])
+    estado_stock = _inventory_status(
+        stock_actual=stock_actual,
+        stock_minimo=int(stock_minimo) if stock_minimo is not None else None,
+        punto_reorden=int(punto_reorden) if punto_reorden is not None else None,
+    )
+
+    return InventarioRead(
+        id=row["id"],
+        repuesto_id=repuesto_id,
+        sede_id=sede_id,
+        codigo_sku=repuesto.get("codigo_sku", ""),
+        repuesto_nombre=repuesto.get("nombre", ""),
+        sede_nombre=sede.get("nombre"),
+        stock_actual=stock_actual,
+        stock_minimo=stock_minimo,
+        stock_maximo=param.get("stock_maximo"),
+        punto_reorden_sugerido_ml=punto_reorden,
+        updated_at=row["updated_at"],
+        critico=estado_stock in {"BAJO", "CRITICO"},
+        estado_stock=estado_stock,
+    )
+
+
+def _critical_inventory_read_from_item(item: InventarioRead) -> InventarioCriticoRead:
+    motivo_parts: list[str] = []
+    if item.stock_minimo is not None and item.stock_actual <= int(item.stock_minimo):
+        motivo_parts.append("stock bajo minimo")
+    if item.punto_reorden_sugerido_ml is not None and item.stock_actual <= int(item.punto_reorden_sugerido_ml):
+        motivo_parts.append("debajo de punto de reorden")
+
+    return InventarioCriticoRead(
+        **item.model_dump(),
+        motivo=" y ".join(motivo_parts) if motivo_parts else "stock critico",
+    )
+
+
 async def get_inventory_workspace(
     client: AsyncClient,
     *,
@@ -897,26 +955,117 @@ async def get_inventory_workspace(
     catalog_client = await create_service_role_client()
     categorias_task = list_all_categorias_public()
     repuestos_task = list_active_parts_catalog(catalog_client)
-    inventario_task = list_inventario(client, page=inventory_page, page_size=inventory_page_size)
-    criticos_task = list_inventario_critico_full(client, sede_id=None)
-    movimientos_task = list_inventory_movements(client, page=movement_page, page_size=movement_page_size)
     sedes_task = list_sedes(client)
     ordenes_task = list_active_work_orders_catalog(client)
 
-    categorias, repuestos, inventario, critical_items, movimientos, sedes, ordenes = await asyncio.gather(
-        categorias_task,
-        repuestos_task,
-        inventario_task,
-        criticos_task,
-        movimientos_task,
-        sedes_task,
-        ordenes_task,
+    movement_start, movement_end = _page_range(movement_page, movement_page_size)
+    movimientos_query = (
+        client.table("movimientos_inventario")
+        .select(
+            "id,repuesto_id,sede_id,tipo,cantidad,ot_id,orden_compra_id,motivo,registrado_por,created_at",
+            count="planned",
+        )
+        .order("created_at", desc=True)
+        .range(movement_start, movement_end)
     )
 
+    inventory_response_task = (
+        client.table("inventario")
+        .select("id,repuesto_id,sede_id,stock_actual,updated_at")
+        .order("updated_at", desc=True)
+        .execute()
+    )
+    movimientos_response_task = movimientos_query.execute()
+
+    categorias, repuestos, sedes, ordenes, inventory_response, movimientos_response = await asyncio.gather(
+        categorias_task,
+        repuestos_task,
+        sedes_task,
+        ordenes_task,
+        inventory_response_task,
+        movimientos_response_task,
+    )
+
+    inventory_rows = list(inventory_response.data or [])
+    movement_rows = list(movimientos_response.data or [])
+    inventory_repuesto_ids = {str(row["repuesto_id"]) for row in inventory_rows if row.get("repuesto_id")}
+    inventory_sede_ids = {str(row["sede_id"]) for row in inventory_rows if row.get("sede_id")}
+    movement_repuesto_ids = {str(row["repuesto_id"]) for row in movement_rows if row.get("repuesto_id")}
+    movement_sede_ids = {str(row["sede_id"]) for row in movement_rows if row.get("sede_id")}
+    ot_ids = {str(row["ot_id"]) for row in movement_rows if row.get("ot_id")}
+    oc_ids = {str(row["orden_compra_id"]) for row in movement_rows if row.get("orden_compra_id")}
+    registrado_por_ids = {str(row["registrado_por"]) for row in movement_rows if row.get("registrado_por")}
+
+    repuestos_map = {
+        str(item.id): {"id": str(item.id), "codigo_sku": item.codigo_sku, "nombre": item.nombre}
+        for item in repuestos
+    }
+    sedes_map = {str(item.id): {"id": str(item.id), "nombre": item.nombre} for item in sedes}
+    ot_map = {str(item.id): {"id": str(item.id), "codigo_ot": item.codigo_ot} for item in ordenes}
+
+    missing_repuesto_ids = (inventory_repuesto_ids | movement_repuesto_ids) - set(repuestos_map)
+    missing_sede_ids = (inventory_sede_ids | movement_sede_ids) - set(sedes_map)
+    missing_ot_ids = ot_ids - set(ot_map)
+
+    missing_repuestos_map, missing_sedes_map, params_map, missing_ot_map, oc_map, perfiles_map = await asyncio.gather(
+        _fetch_id_map(client, table="repuestos", select_fields="id,codigo_sku,nombre", ids=missing_repuesto_ids),
+        _fetch_id_map(client, table="sedes", select_fields="id,nombre", ids=missing_sede_ids),
+        _fetch_all_inventory_params_map(client),
+        _fetch_id_map(client, table="ordenes_trabajo", select_fields="id,codigo_ot", ids=missing_ot_ids),
+        _fetch_id_map(client, table="ordenes_compra", select_fields="id,codigo_oc", ids=oc_ids),
+        _fetch_id_map(client, table="perfiles", select_fields="id,nombres,apellidos", ids=registrado_por_ids),
+    )
+    repuestos_map.update(missing_repuestos_map)
+    sedes_map.update(missing_sedes_map)
+    ot_map.update(missing_ot_map)
+
+    inventory_items = [
+        _inventory_read_from_maps(
+            row,
+            repuestos_map=repuestos_map,
+            sedes_map=sedes_map,
+            params_map=params_map,
+        )
+        for row in inventory_rows
+    ]
+    inventory_start, inventory_end = _page_range(inventory_page, inventory_page_size)
+    inventario = PaginatedResponse[InventarioRead](
+        items=inventory_items[inventory_start : inventory_end + 1],
+        page=inventory_page,
+        page_size=inventory_page_size,
+        total=_response_total(inventory_response, len(inventory_items)),
+    )
+
+    enriched_movements: list[InventoryMovementRead] = []
+    for row in movement_rows:
+        repuesto = repuestos_map.get(str(row.get("repuesto_id")), {})
+        sede = sedes_map.get(str(row.get("sede_id")), {})
+        ot = ot_map.get(str(row.get("ot_id")), {})
+        oc = oc_map.get(str(row.get("orden_compra_id")), {})
+        perfil = perfiles_map.get(str(row.get("registrado_por")), {})
+        payload = dict(row)
+        payload["codigo_sku"] = repuesto.get("codigo_sku")
+        payload["repuesto_nombre"] = repuesto.get("nombre")
+        payload["sede_nombre"] = sede.get("nombre")
+        payload["codigo_ot"] = ot.get("codigo_ot")
+        payload["codigo_oc"] = oc.get("codigo_oc")
+        payload["registrado_por_nombre"] = " ".join(
+            part for part in [perfil.get("nombres"), perfil.get("apellidos")] if part
+        ) or None
+        enriched_movements.append(_movement_row(payload))
+
+    movimientos = PaginatedResponse[InventoryMovementRead](
+        items=enriched_movements,
+        page=movement_page,
+        page_size=movement_page_size,
+        total=_response_total(movimientos_response, len(enriched_movements)),
+    )
+
+    critical_items = [_critical_inventory_read_from_item(item) for item in inventory_items if item.critico]
     criticos_total = len(critical_items)
     bajos_total = sum(1 for item in critical_items if item.estado_stock == "BAJO")
     critical_start, critical_end = _page_range(critical_page, critical_page_size)
-    criticos = PaginatedResponse(
+    criticos = PaginatedResponse[InventarioCriticoRead](
         items=critical_items[critical_start : critical_end + 1],
         page=critical_page,
         page_size=critical_page_size,
