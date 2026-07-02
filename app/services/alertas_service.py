@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -11,6 +12,7 @@ from supabase._async.client import AsyncClient
 from app.core.supabase_client import create_service_role_client
 from app.schemas.alertas import (
     AlertaRead,
+    AlertaProductoRead,
     DashboardIndicadorRead,
     DashboardRefreshResult,
     DashboardWorkspaceRead,
@@ -44,6 +46,121 @@ def _to_dashboard(row: dict) -> DashboardIndicadorRead:
     return DashboardIndicadorRead.model_validate(row)
 
 
+def _extract_generated_document(message: str) -> tuple[str | None, str | None]:
+    patterns = (
+        ("requisicion_compra", r"(SIC/\d{4}/\d{5})"),
+        ("rfq", r"(RFQ/\d{4}/\d{5})"),
+        ("orden_compra", r"(PO-\d{4}-\d{3,}|\bOC[-/]\d+\b)"),
+    )
+    for document_type, pattern in patterns:
+        match = re.search(pattern, message, flags=re.IGNORECASE)
+        if match:
+            return document_type, match.group(1)
+    return None, None
+
+
+async def _enrich_alert_rows(client: AsyncClient, rows: list[dict]) -> list[dict]:
+    if not rows:
+        return rows
+
+    repuesto_ids = sorted({str(row["repuesto_id"]) for row in rows if row.get("repuesto_id")})
+    sede_ids = sorted({str(row["sede_id"]) for row in rows if row.get("sede_id")})
+    generated_codes: dict[str, tuple[str, str]] = {}
+    requisition_codes: list[str] = []
+
+    for row in rows:
+        document_type, document_code = _extract_generated_document(str(row.get("mensaje") or ""))
+        if document_type and document_code:
+            generated_codes[str(row["id"])] = (document_type, document_code)
+            if document_type == "requisicion_compra":
+                requisition_codes.append(document_code)
+
+    repuestos_map: dict[str, dict] = {}
+    if repuesto_ids:
+        repuestos_response = await client.table("repuestos").select("id,codigo_sku,nombre").in_("id", repuesto_ids).execute()
+        repuestos_map = {str(row["id"]): row for row in (repuestos_response.data or [])}
+
+    sedes_map: dict[str, dict] = {}
+    if sede_ids:
+        sedes_response = await client.table("sedes").select("id,nombre").in_("id", sede_ids).execute()
+        sedes_map = {str(row["id"]): row for row in (sedes_response.data or [])}
+
+    requisitions_by_code: dict[str, dict] = {}
+    requisition_products_by_id: dict[str, list[AlertaProductoRead]] = {}
+    if requisition_codes:
+        pr_response = await (
+            client.table("requisiciones_compra")
+            .select("id,codigo_pr")
+            .in_("codigo_pr", sorted(set(requisition_codes)))
+            .execute()
+        )
+        requisitions_by_code = {str(row["codigo_pr"]): row for row in (pr_response.data or []) if row.get("codigo_pr")}
+        pr_ids = [str(row["id"]) for row in (pr_response.data or []) if row.get("id")]
+        if pr_ids:
+            pr_details = await client.table("pr_detalle").select("pr_id,repuesto_id,cantidad").in_("pr_id", pr_ids).execute()
+            pr_detail_rows = pr_details.data or []
+            missing_repuesto_ids = sorted(
+                {
+                    str(row["repuesto_id"])
+                    for row in pr_detail_rows
+                    if row.get("repuesto_id") and str(row["repuesto_id"]) not in repuestos_map
+                }
+            )
+            if missing_repuesto_ids:
+                extra_repuestos = await (
+                    client.table("repuestos").select("id,codigo_sku,nombre").in_("id", missing_repuesto_ids).execute()
+                )
+                repuestos_map.update({str(row["id"]): row for row in (extra_repuestos.data or [])})
+
+            for detail in pr_detail_rows:
+                pr_id = str(detail["pr_id"])
+                part = repuestos_map.get(str(detail["repuesto_id"]), {})
+                requisition_products_by_id.setdefault(pr_id, []).append(
+                    AlertaProductoRead(
+                        repuesto_id=UUID(str(detail["repuesto_id"])) if detail.get("repuesto_id") else None,
+                        codigo_sku=part.get("codigo_sku"),
+                        nombre=part.get("nombre"),
+                        cantidad=int(detail.get("cantidad") or 0),
+                    )
+                )
+
+    enriched_rows: list[dict] = []
+    for row in rows:
+        enriched = dict(row)
+        repuesto_id = str(row["repuesto_id"]) if row.get("repuesto_id") else None
+        sede_id = str(row["sede_id"]) if row.get("sede_id") else None
+        repuesto = repuestos_map.get(repuesto_id or "", {})
+        sede = sedes_map.get(sede_id or "", {})
+        enriched["repuesto_codigo_sku"] = repuesto.get("codigo_sku")
+        enriched["repuesto_nombre"] = repuesto.get("nombre")
+        enriched["sede_nombre"] = sede.get("nombre")
+
+        related_products: list[AlertaProductoRead] = []
+        document_type, document_code = generated_codes.get(str(row["id"]), (None, None))
+        enriched["generated_document_type"] = document_type
+        enriched["generated_document_code"] = document_code
+        enriched["generated_document_id"] = None
+        if document_type == "requisicion_compra" and document_code:
+            linked_pr = requisitions_by_code.get(document_code)
+            if linked_pr:
+                enriched["generated_document_id"] = linked_pr.get("id")
+                related_products = requisition_products_by_id.get(str(linked_pr["id"]), [])
+
+        if not related_products and repuesto_id:
+            related_products = [
+                AlertaProductoRead(
+                    repuesto_id=UUID(repuesto_id),
+                    codigo_sku=repuesto.get("codigo_sku"),
+                    nombre=repuesto.get("nombre"),
+                    cantidad=None,
+                )
+            ]
+
+        enriched["related_products"] = [item.model_dump(mode="json") for item in related_products]
+        enriched_rows.append(enriched)
+    return enriched_rows
+
+
 async def list_alertas(
     client: AsyncClient,
     *,
@@ -67,7 +184,8 @@ async def list_alertas(
     if limit is not None:
         query = query.limit(limit)
     response = await query.execute()
-    return [_to_alert(row) for row in response.data or []]
+    enriched_rows = await _enrich_alert_rows(client, response.data or [])
+    return [_to_alert(row) for row in enriched_rows]
 
 
 async def attend_alert(client: AsyncClient, current_user: CurrentUser, alert_id: str, *, discard: bool = False) -> AlertaRead:

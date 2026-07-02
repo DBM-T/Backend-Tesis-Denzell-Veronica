@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.schemas.enums import AlertSeverity, AlertStatus, AlertType
 from app.schemas.health import HealthResponse
@@ -25,6 +25,20 @@ class AlertaRead(BaseModel):
     atendido_por: UUID | None = None
     atendido_en: datetime | None = None
     created_at: datetime
+    repuesto_codigo_sku: str | None = None
+    repuesto_nombre: str | None = None
+    sede_nombre: str | None = None
+    generated_document_type: str | None = None
+    generated_document_code: str | None = None
+    generated_document_id: UUID | None = None
+    related_products: list["AlertaProductoRead"] = Field(default_factory=list)
+
+
+class AlertaProductoRead(BaseModel):
+    repuesto_id: UUID | None = None
+    codigo_sku: str | None = None
+    nombre: str | None = None
+    cantidad: int | None = None
 
 
 class RecomendacionCompraRead(BaseModel):
