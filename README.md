@@ -20,10 +20,10 @@ Necesarias:
 
 ```bash
 SUPABASE_URL=
-SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
-SUPABASE_JWT_SECRET=
+SUPABASE_PUBLISHABLE_KEY=
+SUPABASE_SECRET_KEY=
 SUPABASE_JWKS_URL=
+SUPABASE_JWT_SECRET=
 PORT=8000
 ENVIRONMENT=development
 OC_LIMITE_APROBACION_GERENCIA=1500.00
@@ -32,6 +32,8 @@ REPORTS_BUCKET=reports
 AUTH_RATE_LIMIT_PER_MINUTE=5
 CORS_ORIGINS=http://localhost:3000
 ```
+
+`SUPABASE_SECRET_KEY` debe ser una clave con prefijo `sb_secret_`. No funciona usar una `sb_publishable_` en esa variable.
 
 ## Levantamiento local
 

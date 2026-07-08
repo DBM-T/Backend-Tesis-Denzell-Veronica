@@ -69,6 +69,29 @@ class Settings(BaseSettings):
             raise ValueError("Los thresholds de prioridad ML deben estar entre 0 y 1.")
         return value
 
+    @field_validator("supabase_anon_key")
+    @classmethod
+    def validate_publishable_key(cls, value: str) -> str:
+        if not value.startswith("sb_publishable_"):
+            raise ValueError(
+                "SUPABASE_ANON_KEY o SUPABASE_PUBLISHABLE_KEY debe ser una publishable key de Supabase."
+            )
+        return value
+
+    @field_validator("supabase_service_role_key")
+    @classmethod
+    def validate_secret_key(cls, value: str) -> str:
+        if value.startswith("sb_publishable_"):
+            raise ValueError(
+                "SUPABASE_SECRET_KEY o SUPABASE_SERVICE_ROLE_KEY no puede ser una publishable key. "
+                "Debes usar una secret key con prefijo sb_secret_."
+            )
+        if not value.startswith("sb_secret_"):
+            raise ValueError(
+                "SUPABASE_SECRET_KEY o SUPABASE_SERVICE_ROLE_KEY debe ser una secret key de Supabase."
+            )
+        return value
+
 
 @lru_cache
 def get_settings() -> Settings:
